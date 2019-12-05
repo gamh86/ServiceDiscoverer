@@ -74,6 +74,10 @@ class serviceDiscoverer
 	int startup(void);
 	int mdns_handle_packet(void *, size_t);
 	int mdns_handle_response_packet(void *, size_t);
+	int mdns_parse_queries(void *, size_t, void *, uint16_t);
+	int mdns_parse_answers(void *, size_t, void *, uint16_t);
+	int mdns_parse_authoritative(void *, size_t, void *, uint16_t);
+	int mdns_parse_additional(void *, size_t, void *, uint16_t);
 	std::map<std::string,std::string> *mdns_parse_text_record(void *, size_t);
 
 	void default_iphdr(struct iphdr *);
@@ -303,14 +307,13 @@ void serviceDiscoverer::check_cached_records(void)
 				map_iter != this->cached_records.end();
 				++map_iter)
 	{
-		std::list<struct mdns_record> &__list = map_iter->second;
-		for (std::list<struct mdns_record>::iterator list_iter = __list.begin();
-					list_iter != __list.end();
+		for (std::list<struct mdns_record>::iterator list_iter = map_iter->second.begin();
+					list_iter != map_iter->second.end();
 				)
 		{
 			if (this->cached_record_is_stale(*list_iter))
 			{
-				list_iter = __list.erase(list_iter);
+				list_iter = map_iter->second.erase(list_iter);
 				continue;
 			}
 			else
@@ -503,6 +506,14 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 		record.cached = time(NULL);
 		record.text_data = NULL;
 
+#ifdef DEBUG
+		std::cerr << "Type=" << this->type_str(record.type) << std::endl;
+		std::cerr << "Class=" << this->klass_str(record.klass) << std::endl;
+		std::cerr << "TTL=" << record.ttl << std::endl;
+		std::cerr << "DATA_LEN=" << record.data_len << std::endl;
+		std::cerr << "Cached=" << record.cached << std::endl;
+#endif
+
 		if (record.type == this->mdns_types["TXT"])
 		{
 			record.text_data = this->mdns_parse_text_record((void *)ptr, (size_t)record.data_len);
@@ -598,53 +609,152 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 	}
 }
 
-int serviceDiscoverer::mdns_handle_packet(void *packet, size_t size)
+int serviceDiscoverer::mdns_parse_queries(void *packet, size_t size, void *data_start, uint16_t nr)
 {
-	struct mdns_hdr *hdr = (struct mdns_hdr *)packet;
-	char *ptr = (char *)packet + sizeof(struct mdns_hdr);
+	if (!nr)
+		return 0;
+
+	struct mdns_hdr *hdr = NULL;
+	std::string decoded;
 	uint16_t type;
 	uint16_t klass;
-
-	if (this->is_response(htons(hdr->flags)) == true)
-	{
-		std::cerr << "Handling mDNS response packet" << std::endl;
-		return (this->mdns_handle_response_packet(packet, size));
-	}
-
-	char *e = ((char *)packet + size);
-	//char *decoded_name = (char *)calloc(512, 1);
-	std::string decoded_name;
 	int delta = 0;
+	char *ptr = (char *)data_start;
 
 	while (true)
 	{
-		decoded_name = this->decode_name(packet, ptr, &delta);
-
-		if (delta < 0)
-		{
-			//free(decoded_name);
-			return -1;
-		}
+		decoded = this->decode_name(packet, ptr, &delta);
 
 		ptr += delta;
+
 		type = this->get_16bit_val(ptr);
 		ptr += 2;
 		klass = this->get_16bit_val(ptr);
 		ptr += 2;
 
-		std::cout << " Query [" << this->type_str(type) << " : " << this->klass_str(klass) << "] " << decoded_name << std::endl;
+		delta += 4;
 
-		if (ptr >= e)
+		std::cerr << "Query  \"" << decoded << "\" [" << this->type_str(type) << " : " << this->klass_str(klass) << "]" << std::endl;
+
+		--nr;
+		if (!nr)
 			break;
 	}
 
-	//free(decoded_name);
+	return delta;
+}
+
+int serviceDiscoverer::mdns_parse_additional(void *packet, size_t size, void *data_start, uint16_t nr)
+{
 	return 0;
+}
 
-	fail_free_mem__hmdns:
+int serviceDiscoverer::mdns_parse_authoritative(void *packet, size_t size, void *data_start, uint16_t nr)
+{
+	return 0;
+}
 
-	//free(decoded_name);
-	return -1;
+int serviceDiscoverer::mdns_parse_answers(void *packet, size_t size, void *data_start, uint16_t nr)
+{
+	if (!nr)
+		return 0;
+
+	std::string decoded;
+	struct mdns_record record;
+	char *ptr = (char *)data_start;
+	int delta;
+
+	clear_struct(&record);
+	record.text_data = NULL;
+
+	while (true)
+	{
+		decoded = this->decode_name(packet, ptr, &delta);
+		ptr += delta;
+
+		record.type = this->get_16bit_val(ptr);
+		ptr += 2;
+		record.klass = this->get_16bit_val(ptr);
+		ptr += 2;
+		record.ttl = this->get_32bit_val(ptr);
+		ptr += 4;
+		record.data_len = this->get_16bit_val(ptr);
+		ptr += 2;
+		record.cached = time(NULL);
+
+		delta += 10;
+
+		if (record.type == this->mdns_types["TXT"])
+		{
+			record.text_data = this->mdns_parse_text_record((void *)ptr, record.data_len);
+			ptr += record.data_len;
+		}
+		else
+		if (record.type == this->mdns_types["SRV"])
+		{
+			record.srv_data.priority = this->get_16bit_val(ptr);
+			ptr += 2;
+			record.srv_data.weight = this->get_16bit_val(ptr);
+			ptr += 2;
+			record.srv_data.port = this->get_16bit_val(ptr);
+			ptr += 2;
+			std::cerr << "appending \"target\" to srv data record" << std::endl;
+			record.srv_data.target.append(ptr, (record.data_len - 6));
+			std::cerr << "done" << std::endl;
+		}
+		else
+		{
+			ptr += record.data_len;
+		}
+
+		delta += record.data_len;
+
+		std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->cached_records.find(decoded);
+		if (map_iter == this->cached_records.end())
+		{
+			std::cerr << "Caching record" << std::endl;
+			std::list<struct mdns_record> __list;
+			__list.push_back(record);
+			this->cached_records.insert( std::pair<std::string,std::list<struct mdns_record> >(decoded, __list) );
+			std::cerr << "Cached record for " << decoded << std::endl;
+		}
+		else
+		{
+			for (std::list<struct mdns_record>::iterator list_iter = map_iter->second.begin();
+					list_iter != map_iter->second.end();
+					++list_iter)
+			{
+				if (list_iter->type == record.type && list_iter->klass == record.klass)
+				{
+					std::cerr << "Erasing old record (may as well, we've come this far)" << std::endl;
+					map_iter->second.erase(list_iter);
+					map_iter->second.push_back(record);
+					std::cerr << "Replace with fresh record" << std::endl;
+					break;
+				}
+			}
+		}
+	}
+
+	return delta;
+}
+
+int serviceDiscoverer::mdns_handle_packet(void *packet, size_t size)
+{
+	struct mdns_hdr *hdr = (struct mdns_hdr *)packet;
+	char *ptr = (char *)packet + sizeof(struct mdns_hdr);
+	int delta;
+
+	delta = this->mdns_parse_queries(packet, size, (void *)ptr, ntohs(hdr->nr_qs));
+	ptr += delta;
+	delta = this->mdns_parse_answers(packet, size, (void *)ptr, ntohs(hdr->nr_as));
+	ptr += delta;
+	delta = this->mdns_parse_authoritative(packet, size, (void *)ptr, ntohs(hdr->nr_aa));
+	ptr += delta;
+	delta = this->mdns_parse_additional(packet, size, (void *)ptr, ntohs(hdr->nr_ad));
+	ptr += delta;
+
+	return 0;
 }
 
 int serviceDiscoverer::startup(void)
@@ -780,7 +890,7 @@ int serviceDiscoverer::mdns_listen(void)
 					continue;
 				}
 #ifdef DEBUG
-				fprintf(stderr, "printing bytes (%ld bytes)\n", bytes);
+				fprintf(stderr, "Duming hex of received mDNS packet (%ld bytes)\n", bytes);
 				for (int i = 0; i < (int)bytes; ++i)
 				{
 					fprintf(stderr, "\\x%02hhx", buffer[i]);
