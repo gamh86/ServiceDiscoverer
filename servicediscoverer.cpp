@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <net/if.h>
 #include <netinet/in.h>
@@ -10,6 +11,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <iostream>
@@ -19,7 +21,6 @@
 #define mDNS_MULTICAST "224.0.0.251"
 #define mDNS_PORT 5353
 #define mDNS_MAX_PACKET_SIZE 9000 /* includes ip hdr, udp hdr and dns hdr: RFC 6762 */
-#define MDNS_LISTEN_INTERVAL 5
 
 #define clear_struct(s) memset((s), 0, sizeof((*s)))
 
@@ -79,6 +80,13 @@ class serviceDiscoverer
 	int mdns_parse_authoritative(void *, size_t, void *, uint16_t);
 	int mdns_parse_additional(void *, size_t, void *, uint16_t);
 	std::map<std::string,std::string> *mdns_parse_text_record(void *, size_t);
+	void mdns_print_record(std::string, struct mdns_record&);
+
+	bool should_replace_file(void);
+	bool should_do_query(void);
+
+	std::string timestamp_to_str(time_t);
+	void mdns_save_cached_records(void);
 
 	void default_iphdr(struct iphdr *);
 	void default_udphdr(struct udphdr *);
@@ -140,8 +148,10 @@ class serviceDiscoverer
 	struct sockaddr_in mdns_addr;
 	struct sockaddr_in local_ifaddr;
 
-	int query_interval = 60; /* seconds */
 	time_t time_last_service_query;
+	time_t time_pushed_to_disk;
+	int query_interval = 120; /* seconds */
+	int disk_push_interval = 600; /* seconds */
 
 	std::map<std::string,std::list<struct mdns_record> > cached_records;
 };
@@ -256,8 +266,14 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 	int delta = 0;
 	std::string decoded;
 
+#ifdef DEBUG
+	std::cerr << "Entered decode_name(): sitting at:\n" << std::endl;
+	for (int i = 0; i < 10; ++i)
+		fprintf(stderr, "\\x%02hhx", name[i]);
+	fprintf(stderr, "\n");
+#endif
 	ptr = name;
-	if ((unsigned char)*ptr < 0x20)
+	if ((unsigned char)*ptr < 0x20 && (unsigned char)*ptr < 0xc0)
 	{
 		++ptr;
 		++delta;
@@ -270,8 +286,24 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 
 		if ((unsigned char)*ptr >= LABEL_JUMP_INDICATOR)
 		{
+#ifdef DEBUG
+			std::cerr << "Jumping! Currently at:\n" << std::endl;
+			for (int i = 0; i < 10; ++i)
+				fprintf(stderr, "\\x%02hhx", ptr[i]);
+			fprintf(stderr, "\n");
+			std::cerr << "Name thus far: " << decoded << std::endl;
+#endif
 			off = this->label_get_offset(ptr);
+#ifdef DEBUG
+			std::cerr << "Jump to start of mDNS packet + " << off << " bytes" << std::endl;
+#endif
 			ptr = ((char *)data + off);
+#ifdef DEBUG
+			std::cerr << "Now at:\n" << std::endl;
+			for (int i = 0; i < 10; ++i)
+				fprintf(stderr, "\\x%02hhx", ptr[i]);
+			fprintf(stderr, "\n");
+#endif
 			jumped = true;
 		}
 
@@ -303,6 +335,9 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 
 void serviceDiscoverer::check_cached_records(void)
 {
+#ifdef DEBUG
+	std::cerr << "Checking cache for stale records" << std::endl;
+#endif
 	for (std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->cached_records.begin();
 				map_iter != this->cached_records.end();
 				++map_iter)
@@ -313,6 +348,9 @@ void serviceDiscoverer::check_cached_records(void)
 		{
 			if (this->cached_record_is_stale(*list_iter))
 			{
+#ifdef DEBUG
+				std::cerr << "Removing stale record from cache for \"" << map_iter->first << "\"" << std::endl;
+#endif
 				list_iter = map_iter->second.erase(list_iter);
 				continue;
 			}
@@ -411,6 +449,127 @@ const char *serviceDiscoverer::type_str(uint16_t type)
 	return (const char *)"Unknown type";
 }
 
+std::string serviceDiscoverer::timestamp_to_str(time_t tstamp)
+{
+	static char tmp[128];
+	struct tm tm;
+
+	if (!gmtime_r((const time_t *)&tstamp, &tm))
+	{
+		std::cerr << __func__ << ": gmtime_r error (" << strerror(errno) << ")" << std::endl;
+		return NULL;
+	}
+
+	strftime(tmp, 128, "%a %d %b %Y %H:%M:%S", &tm);
+	std::string __ret = tmp;
+
+	return __ret;
+}
+
+void serviceDiscoverer::mdns_save_cached_records(void)
+{
+	time_t timestamp = time(NULL);
+	std::string filename;
+	FILE *fp = NULL;
+	char timestamp_str[64];
+
+	sprintf(timestamp_str, "%ld", timestamp);
+
+	filename.append("mdns_local_services_");
+	filename.append(timestamp_str);
+	filename.append(".txt");
+
+	fp = fdopen(open(filename.data(), O_RDWR|O_TRUNC|O_CREAT, S_IRUSR|S_IWUSR), "r+");
+	if (!fp)
+	{
+		std::cerr << " *** Failed to save cached records in file ***" << std::endl;
+		return;
+	}
+
+	for (std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->cached_records.begin();
+			map_iter != this->cached_records.end();
+			++map_iter)
+	{
+		fprintf(fp, " Records for host  %s\n\n", map_iter->first.data());
+
+		for (std::list<struct mdns_record>::iterator list_iter = map_iter->second.begin();
+				list_iter != map_iter->second.end();
+				++list_iter)
+		{
+			fprintf(fp,
+					"\n"
+					" Type          %hu\n"
+					" Class         %hu\n"
+					" Cached        %s\n",
+					list_iter->type,
+					list_iter->klass,
+					this->timestamp_to_str(list_iter->cached).data());
+
+			if (list_iter->type == this->mdns_types["SRV"])
+			{
+				fprintf(fp,
+						" Priority      %hu\n"
+						" Weight        %hu\n"
+						" Port          %hu\n"
+						" Target        %s\n\n",
+						list_iter->srv_data.priority,
+						list_iter->srv_data.weight,
+						list_iter->srv_data.port,
+						list_iter->srv_data.target.data());
+			}
+			else
+			if (list_iter->type == this->mdns_types["TXT"])
+			{
+				for (std::map<std::string,std::string>::iterator _list_iter = list_iter->text_data->begin();
+						_list_iter != list_iter->text_data->end();
+						++_list_iter)
+				{
+					fprintf(fp, "%s=%s\n", _list_iter->first.data(), _list_iter->second.data());
+				}
+
+				fprintf(fp, "\n");
+			}
+		}
+	}
+
+	fflush(fp);
+	fclose(fp);
+	fp = NULL;
+
+	return;
+}
+
+void serviceDiscoverer::mdns_print_record(std::string host, struct mdns_record& record)
+{
+	std::cout << " Host          " << host << std::endl;
+	uint32_t age = (time(NULL) - record.ttl);
+	fprintf(stdout,
+			" Type          %s\n"
+			" Class         %s\n"
+			" Time-to-Live  %u second%s\n"
+			" Age           %u second%s\n",
+			this->type_str(record.type), this->klass_str(record.klass),
+			record.ttl,
+			record.ttl == 1 ? "" : "s",
+			age,
+			age == 1 ? "" : "s");
+			
+
+	if (record.type == this->mdns_types["SRV"])
+	{
+		fprintf(stdout,
+			" Priority      %hu\n"
+			" Weight        %hu\n"
+			" Port          %hu\n",
+			record.srv_data.priority,
+			record.srv_data.weight,
+			record.srv_data.port);
+		std::cout << " Target        " << record.srv_data.target << std::endl;
+	}
+
+	std::cout << std::endl;
+}
+
 std::map<std::string,std::string> *serviceDiscoverer::mdns_parse_text_record(void *data, size_t len)
 {
 	char *p = (char *)data;
@@ -506,14 +665,6 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 		record.cached = time(NULL);
 		record.text_data = NULL;
 
-#ifdef DEBUG
-		std::cerr << "Type=" << this->type_str(record.type) << std::endl;
-		std::cerr << "Class=" << this->klass_str(record.klass) << std::endl;
-		std::cerr << "TTL=" << record.ttl << std::endl;
-		std::cerr << "DATA_LEN=" << record.data_len << std::endl;
-		std::cerr << "Cached=" << record.cached << std::endl;
-#endif
-
 		if (record.type == this->mdns_types["TXT"])
 		{
 			record.text_data = this->mdns_parse_text_record((void *)ptr, (size_t)record.data_len);
@@ -528,14 +679,18 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 			ptr += 2;
 			record.srv_data.port = this->get_16bit_val(ptr);
 			ptr += 2;
-			record.srv_data.target.append((char *)ptr, (record.data_len - 6));
 
+			record.srv_data.target = this->decode_name(packet, ptr, &delta);
+			ptr += delta;
+
+#if 0
 #ifdef DEBUG
 			std::cerr << "Got the following SRV data:\n" << std::endl;
 			std::cerr << "priority=" << record.srv_data.priority << std::endl;
 			std::cerr << "weight=" << record.srv_data.weight << std::endl;
 			std::cerr << "port=" << record.srv_data.port << std::endl;
 			std::cerr << "target=" << record.srv_data.target << std::endl;
+#endif
 #endif
 		}
 		else
@@ -634,7 +789,7 @@ int serviceDiscoverer::mdns_parse_queries(void *packet, size_t size, void *data_
 
 		delta += 4;
 
-		std::cerr << "Query  \"" << decoded << "\" [" << this->type_str(type) << " : " << this->klass_str(klass) << "]" << std::endl;
+		std::cerr << "\nQuery  \"" << decoded << "\" [" << this->type_str(type) << " : " << this->klass_str(klass) << "]\n" << std::endl;
 
 		--nr;
 		if (!nr)
@@ -698,9 +853,9 @@ int serviceDiscoverer::mdns_parse_answers(void *packet, size_t size, void *data_
 			ptr += 2;
 			record.srv_data.port = this->get_16bit_val(ptr);
 			ptr += 2;
-			std::cerr << "appending \"target\" to srv data record" << std::endl;
-			record.srv_data.target.append(ptr, (record.data_len - 6));
-			std::cerr << "done" << std::endl;
+
+			record.srv_data.target = this->decode_name(packet, ptr, &delta);
+			ptr += delta;
 		}
 		else
 		{
@@ -709,14 +864,51 @@ int serviceDiscoverer::mdns_parse_answers(void *packet, size_t size, void *data_
 
 		delta += record.data_len;
 
+		this->mdns_print_record(decoded, record);
+#if 0
+		std::cerr << "Record for " << decoded << std::endl;
+
+		fprintf(stderr,
+				"Type = %s : Class = %s\n"
+				"TTL = %u seconds\n",
+				this->type_str(record.type), this->klass_str(record.klass),
+				record.ttl);
+
+		if (record.type == this->mdns_types["SRV"])
+		{
+			fprintf(stderr,
+				"Priority = %hu\n"
+				"Weight = %hu\n"
+				"Port = %hu\n",
+				record.srv_data.priority,
+				record.srv_data.weight,
+				record.srv_data.port);
+			std::cerr << "Target = " << record.srv_data.target << std::endl;
+		}
+		else
+		if (record.type == this->mdns_types["TXT"])
+		{
+			for (std::map<std::string,std::string>::iterator map_iter = record.text_data->begin();
+					map_iter != record.text_data->end();
+					++map_iter)
+			{
+				std::cerr << map_iter->first << "=" << map_iter->second << std::endl;
+			}
+		}
+#endif
+
 		std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->cached_records.find(decoded);
 		if (map_iter == this->cached_records.end())
 		{
-			std::cerr << "Caching record" << std::endl;
+#ifdef DEBUG
+			std::cerr << "No record in cache for " << decoded << ": caching record" << std::endl;
+#endif
 			std::list<struct mdns_record> __list;
 			__list.push_back(record);
 			this->cached_records.insert( std::pair<std::string,std::list<struct mdns_record> >(decoded, __list) );
-			std::cerr << "Cached record for " << decoded << std::endl;
+#ifdef DEBUG
+			std::cerr << "Record for " << decoded << " added to cache" << std::endl;
+#endif
 		}
 		else
 		{
@@ -726,14 +918,22 @@ int serviceDiscoverer::mdns_parse_answers(void *packet, size_t size, void *data_
 			{
 				if (list_iter->type == record.type && list_iter->klass == record.klass)
 				{
-					std::cerr << "Erasing old record (may as well, we've come this far)" << std::endl;
+#ifdef DEBUG
+					std::cerr << "Found previous record in cache for " << decoded << std::endl;
+					std::cerr << "Age = " << (time(NULL) - list_iter->cached) << " seconds" << std::endl;
+					std::cerr << "(ttl = " << list_iter->ttl << " seconds)" << std::endl;
+#endif
 					map_iter->second.erase(list_iter);
 					map_iter->second.push_back(record);
-					std::cerr << "Replace with fresh record" << std::endl;
 					break;
 				}
 			}
 		}
+
+		--nr;
+
+		if (!nr)
+			break;
 	}
 
 	return delta;
@@ -854,6 +1054,22 @@ int serviceDiscoverer::startup(void)
 	return 0;
 }
 
+bool serviceDiscoverer::should_replace_file(void)
+{
+	if ((time(NULL) - this->time_pushed_to_disk) >= this->disk_push_interval)
+		return true;
+	else
+		return false;
+}
+
+bool serviceDiscoverer::should_do_query(void)
+{
+	if ((time(NULL) - this->time_last_service_query) >= this->query_interval)
+		return true;
+	else
+		return false;
+}
+
 int serviceDiscoverer::mdns_listen(void)
 {
 	fd_set rset;
@@ -889,13 +1105,15 @@ int serviceDiscoverer::mdns_listen(void)
 				{
 					continue;
 				}
+#if 0
 #ifdef DEBUG
-				fprintf(stderr, "Duming hex of received mDNS packet (%ld bytes)\n", bytes);
+				fprintf(stderr, "Dumping hex of received mDNS packet (%ld bytes)\n", bytes);
 				for (int i = 0; i < (int)bytes; ++i)
 				{
 					fprintf(stderr, "\\x%02hhx", buffer[i]);
 				}
 				fprintf(stderr, "\n");
+#endif
 #endif
 				buffer[bytes] = 0;
 				mdns_start = ((char *)buffer + sizeof(struct iphdr) + sizeof(struct udphdr));
@@ -906,7 +1124,14 @@ int serviceDiscoverer::mdns_listen(void)
 		{
 			/* do other stuff in the meantime */
 		}
+
 		this->check_cached_records();
+
+		if (this->should_replace_file() == true)
+			this->mdns_save_cached_records();
+
+		if (this->should_do_query() == true)
+			this->mdns_query_all_services();
 	}
 }
 
@@ -1001,6 +1226,8 @@ int serviceDiscoverer::mdns_query_all_services(void)
 #endif
 
 	bytes = sendto(this->sock, buffer, len, 0, (struct sockaddr *)&this->mdns_addr, (socklen_t)sizeof(this->mdns_addr));
+
+	this->time_last_service_query = time(NULL);
 	return 0;
 }
 
