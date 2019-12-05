@@ -199,9 +199,6 @@ std::string serviceDiscoverer::encode_name(std::string name)
 
 	strcpy(tmp, name.data());
 	strcat(tmp, ".");
-#ifdef DEBUG
-	std::cerr << "tmp: " << tmp << std::endl;
-#endif
 
 	len = strlen(tmp);
 	e = tmp + len;
@@ -237,17 +234,9 @@ std::string serviceDiscoverer::encode_name(std::string name)
 
 	std::string _encoded = encoded;
 
-	len = i;
-	for (i = 0; i < len; ++i)
-		fprintf(stderr, "\\x%02hhx", encoded[i]);
-	fprintf(stderr, "\n");
-
 	free(tmp);
 	free(encoded);
 
-#ifdef DEBUG
-	std::cerr << "Encoded: " << _encoded << std::endl;
-#endif
 	return _encoded;
 }
 
@@ -340,7 +329,10 @@ bool serviceDiscoverer::is_mdns_pkt(char *data)
 {
 	struct udphdr *udp = (struct udphdr *)((char *)data + sizeof(struct iphdr));
 
-	return ntohs(udp->dest) == mDNS_PORT;
+	if (ntohs(udp->dest) != mDNS_PORT && ntohs(udp->source) != mDNS_PORT)
+		return false;
+	else
+		return true;
 }
 
 bool serviceDiscoverer::is_query(uint16_t flags)
@@ -419,7 +411,6 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 	struct mdns_record record;
 	char *ptr = (char *)packet + sizeof(struct mdns_hdr);
 	char *e = (char *)packet + size;
-	//char *decoded_name = (char *)calloc(512, 1);
 	std::string decoded_name;
 	int delta;
 	uint16_t type;
@@ -466,6 +457,8 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 		record.cached = time(NULL);
 		record.data = data;
 
+		std::cout << "Service: " << decoded_name << std::endl;
+
 		std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->cached_records.find(decoded_name);
 
 		if (map_iter == this->cached_records.end())
@@ -475,20 +468,25 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 		}
 		else
 		{
-			std::list<struct mdns_record> &__list = map_iter->second;
-			std::list<struct mdns_record>::iterator list_iter;
+			//std::list<struct mdns_record> &__list = map_iter->second;
+			//std::list<struct mdns_record>::iterator list_iter;
 			bool no_cache = false;
 
-			list_iter = __list.begin();
-			while (list_iter != __list.end())
+			for (std::list<struct mdns_record>::iterator list_iter = map_iter->second.begin();
+					list_iter != map_iter->second.end();
+					++list_iter)
+			//list_iter = __list.begin();
+			//while (list_iter != __list.end())
 			{
 				if (list_iter->type == record.type && list_iter->klass == record.klass)
 				{
 					if (this->cached_record_is_stale(*list_iter) == true || this->should_flush_cache(klass) == true)
 					{
 						free(list_iter->data);
-						__list.erase(list_iter);
-						__list.push_back(record);
+						//__list.erase(list_iter);
+						map_iter->second.erase(list_iter);
+						map_iter->second.push_back(record);
+						//__list.push_back(record);
 						std::cout << "Record for \"" << decoded_name << "\" is stale: removing from cache" << std::endl;
 						std::cout << "Cached fresh record for \"" << decoded_name << "\" exists" << std::endl;
 					}
@@ -499,7 +497,9 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 
 			if (!no_cache)
 			{
-				__list.push_back(record);
+				//this->cached_records.push_back(record);
+				//__list.push_back(record);
+				map_iter->second.push_back(record);
 				std::cout << "Cached record for \"" << decoded_name << "\" exists" << std::endl;
 			}
 			else
@@ -780,13 +780,7 @@ int serviceDiscoverer::mdns_query_all_services(void)
 			list_iter != this->services.end();
 			++list_iter)
 	{
-#ifdef DEBUG
-		std::cerr << "Encoding name " << *list_iter << std::endl;
-#endif
 		encoded_name = this->encode_name(*list_iter);
-#ifdef DEBUG
-		std::cerr << "Got back: " << encoded_name << std::endl;
-#endif
 
 		len = encoded_name.length();
 		memcpy(b, encoded_name.data(), len);
@@ -928,7 +922,7 @@ main(void)
 {
 	serviceDiscoverer *sd = new serviceDiscoverer();
 	sd->mdns_query_all_services();
-	//sd->mdns_listen();
+	sd->mdns_listen();
 
 	delete sd;
 
