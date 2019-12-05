@@ -3,10 +3,12 @@
 #include <limits.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -34,7 +36,7 @@ struct mdns_hdr
 	uint16_t nr_as;
 	uint16_t nr_aa;
 	uint16_t nr_ad;
-};
+} __attribute__((__packed__));
 
 struct mdns_record
 {
@@ -82,6 +84,8 @@ class serviceDiscoverer
 	const char * klass_str(uint16_t);
 	const char * type_str(uint16_t);
 
+	bool is_udp_pkt(char *);
+	bool is_mdns_pkt(char *);
 	bool is_query(uint16_t);
 	bool is_response(uint16_t);
 	bool should_flush_cache(uint16_t); /* checks for the CACHE FLUSH bit in class field */
@@ -112,6 +116,7 @@ class serviceDiscoverer
 	int sock;
 	in_port_t port;
 	struct sockaddr_in mdns_addr;
+	struct sockaddr_in local_ifaddr;
 
 	int query_interval = 60; /* seconds */
 	time_t time_last_service_query;
@@ -123,7 +128,10 @@ serviceDiscoverer::serviceDiscoverer()
 {
 	srand(time(NULL));
 	if (this->startup() < 0)
+	{
+		std::cerr << "aborting" << std::endl;
 		abort();
+	}
 }
 
 serviceDiscoverer::~serviceDiscoverer()
@@ -150,7 +158,11 @@ uint16_t serviceDiscoverer::new_txid(void)
 #define DNS_LABEL_OFFSET_BIAS (0x100 * 0xc0)
 off_t serviceDiscoverer::label_get_offset(char *p)
 {
-	return (((*p * 0x100) + *(p+1)) - DNS_LABEL_OFFSET_BIAS);
+/*
+ * ALWAYS remember it MUST be unsigned char, or you'll
+ * get a NEGATIVE result for *p * 0x100 !
+ */
+	return ((((unsigned char)*p * 0x100) + *(p+1)) - DNS_LABEL_OFFSET_BIAS);
 }
 
 char *serviceDiscoverer::encode_name(char *name)
@@ -163,12 +175,26 @@ char *serviceDiscoverer::encode_name(char *name)
 	char *p;
 	char *e;
 
+	if (!tmp)
+	{
+		std::cerr << __func__ << ": failed to allocate memory for tmp var (" << strerror(errno) << ")" << std::endl;
+		return NULL;
+	}
+
+	if (!encoded_name)
+	{
+		std::cerr << __func__ << ": failed to allocate memory for encoded name (" << strerror(errno) << ")" << std::endl;
+		return NULL;
+	}
+
 	strcpy(tmp, name);
 	strcat(tmp, ".");
 
 	e = (tmp + strlen(tmp));
 
 	p = tmp;
+	i = 0;
+
 	while (true)
 	{
 		dot = memchr((void *)p, '.', (size_t)(e - p));
@@ -196,9 +222,6 @@ char *serviceDiscoverer::encode_name(char *name)
 	free(tmp);
 	tmp = NULL;
 
-#ifdef DEBUG
-	std::cerr << "Encoded name: " << encoded_name << std::endl;
-#endif
 	return encoded_name;
 }
 
@@ -211,26 +234,33 @@ int serviceDiscoverer::decode_name(void *data, char *dest, char *name)
 	int didx = 0;
 	int delta = 0;
 
+	ptr = name;
+	if ((unsigned char)*ptr < 0x20)
+	{
+		++ptr;
+		++delta;
+	}
+
 	while (true)
 	{
 		if (*ptr == 0)
 			break;
 
-		if (*ptr >= LABEL_JUMP_INDICATOR)
+		if ((unsigned char)*ptr >= LABEL_JUMP_INDICATOR)
 		{
 			off = this->label_get_offset(ptr);
 			ptr = ((char *)data + off);
 			jumped = true;
 		}
 
-		if (!isascii(*ptr) && !isdigit(*ptr) && *ptr < LABEL_JUMP_INDICATOR)
+		if ((unsigned char)*ptr < 0x20)
 			dest[didx++] = '.';
 		else
 			dest[didx++] = *ptr;
 
 		++ptr;
 
-		if (!jumped)
+		if (jumped == false)
 			++delta;
 	}
 
@@ -239,7 +269,7 @@ int serviceDiscoverer::decode_name(void *data, char *dest, char *name)
 /*
  * Either NAME + DELTA == \x00 or NAME + DELTA == 0xCx (start of jump offset)
  */
-	if (jumped)
+	if (jumped == true)
 		delta += 2;
 	else
 		++delta;
@@ -269,6 +299,20 @@ void serviceDiscoverer::check_cached_records(void)
 			}
 		}
 	}
+}
+
+bool serviceDiscoverer::is_udp_pkt(char *data)
+{
+	struct iphdr *ip = (struct iphdr *)data;
+
+	return ip->protocol == IPPROTO_UDP;
+}
+
+bool serviceDiscoverer::is_mdns_pkt(char *data)
+{
+	struct udphdr *udp = (struct udphdr *)((char *)data + sizeof(struct iphdr));
+
+	return ntohs(udp->dest) == mDNS_PORT;
 }
 
 bool serviceDiscoverer::is_query(uint16_t flags)
@@ -439,13 +483,17 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 		--total_answers;
 		if (!total_answers)
 			break;
+
+#ifdef DEBUG
+		std::cerr << total_answers << " answers remaining" << std::endl;
+#endif
 	}
 }
 
 int serviceDiscoverer::mdns_handle_packet(void *packet, size_t size)
 {
 	struct mdns_hdr *hdr = (struct mdns_hdr *)packet;
-	char *ptr = (char *)packet + sizeof(hdr);
+	char *ptr = (char *)packet + sizeof(struct mdns_hdr);
 	uint16_t type;
 	uint16_t klass;
 
@@ -480,9 +528,11 @@ int serviceDiscoverer::mdns_handle_packet(void *packet, size_t size)
 			break;
 	}
 
+	free(decoded_name);
 	return 0;
 
 	fail_free_mem__hmdns:
+
 	free(decoded_name);
 	return -1;
 }
@@ -491,7 +541,48 @@ int serviceDiscoverer::startup(void)
 {
 	struct ip_mreq mreq;
 	struct sockaddr_in sin;
+	struct ifreq ifr;
+	struct if_nameindex *ifnames = NULL;
 	int opt;
+	int idx;
+
+	clear_struct(&ifr);
+	if (!(ifnames = if_nameindex()))
+	{
+		std::cerr << __func__ << ": if_nameindex error (" << strerror(errno) << ")" << std::endl;
+		return -1;
+	}
+
+	idx = 0;
+	while (ifnames[idx].if_name[0] != 'w')
+	{
+		++idx;
+	}
+
+	if (ifnames[idx].if_name[0] != 'w')
+	{
+		std::cerr << __func__ << ": failed to get wireless interface" << std::endl;
+		if (ifnames)
+			if_freenameindex(ifnames);
+		return -1;
+	}
+
+	strcpy(ifr.ifr_name, ifnames[idx].if_name);
+	if_freenameindex(ifnames);
+
+	if ((this->sock = socket(AF_INET, SOCK_RAW, IPPROTO_UDP)) < 0)
+	{
+		std::cerr << __func__ << ": failed to open socket (" << strerror(errno) << ")" << std::endl;
+		return -1;
+	}
+
+	if (ioctl(this->sock, SIOCGIFADDR, &ifr) < 0)
+	{
+		std::cerr << __func__ << ": ioctl SIOCGIFADDR error (" << strerror(errno) << ")" << std::endl;
+		return -1;
+	}
+
+	memcpy(&this->local_ifaddr, &ifr.ifr_addr, sizeof(struct sockaddr_in));
 
 	clear_struct(&mreq);
 	inet_aton(mDNS_MULTICAST, &mreq.imr_multiaddr);
@@ -499,17 +590,42 @@ int serviceDiscoverer::startup(void)
 
 /* Get a random high port */
 	this->port = ((rand() % (65535 - (IPPORT_RESERVED * 10))) + (IPPORT_RESERVED * 10));
-	this->sock = socket(AF_INET, SOCK_RAW, IPPROTO_UDP);
 
 	clear_struct(&sin);
 	sin.sin_addr.s_addr = INADDR_ANY;
 	sin.sin_port = htons(this->port);
-	bind(this->sock, (struct sockaddr *)&sin, (socklen_t)sizeof(sin));
+
+	if (bind(this->sock, (struct sockaddr *)&sin, (socklen_t)sizeof(sin)) != 0)
+	{
+		std::cerr << __func__ << ": failed to bind socket (" << strerror(errno) << ")" << std::endl;
+		return -1;
+	}
+
 	opt = 1;
-	setsockopt(this->sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+	if (setsockopt(this->sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+	{
+		std::cerr << __func__ << ": failed to set option SO_REUSEADDR (" << strerror(errno) << ")" << std::endl;
+		return -1;
+	}
+
+	if (setsockopt(this->sock, IPPROTO_IP, IP_HDRINCL, &opt, sizeof(opt)) < 0)
+	{
+		std::cerr << __func__ << ": failed to set option IP_HDRINCL (" << strerror(errno) << ")" << std::endl;
+		return -1;
+	}
+
 	opt = 0;
-	setsockopt(this->sock, IPPROTO_IP, IP_MULTICAST_LOOP, &opt, sizeof(opt));
-	setsockopt(this->sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
+	if (setsockopt(this->sock, IPPROTO_IP, IP_MULTICAST_LOOP, &opt, sizeof(opt)) < 0)
+	{
+		std::cerr << __func__ << ": failed to set option IP_MULTICAST_LOOP (" << strerror(errno) << ")" << std::endl;
+		return -1;
+	}
+
+	if (setsockopt(this->sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
+	{
+		std::cerr << __func__ << ": failed to set option IP_ADD_MEMBERSHIP (" << strerror(errno) << ")" << std::endl;
+		return -1;
+	}
 
 	clear_struct(&this->mdns_addr);
 	inet_aton(mDNS_MULTICAST, &this->mdns_addr.sin_addr);
@@ -535,7 +651,7 @@ int serviceDiscoverer::mdns_listen(void)
 	{
 		FD_ZERO(&rset);
 		FD_SET(this->sock, &rset);
-		tv.tv_sec = MDNS_LISTEN_INTERVAL;
+		tv.tv_sec = 100;
 
 		nr_ready = select(this->sock + 1, &rset, NULL, NULL, &tv);
 
@@ -543,35 +659,92 @@ int serviceDiscoverer::mdns_listen(void)
 		{
 			if (FD_ISSET(this->sock, &rset))
 			{
-				bytes = recv(this->sock, buffer, buffer_size, 0); 
+				bytes = recv(this->sock, buffer, buffer_size, 0);
+				if (this->is_udp_pkt(buffer) == false)
+				{
+#ifdef DEBUG
+					std::cerr << "Not a UDP packet" << std::endl;
+#endif
+					continue;
+				}
+
+				if (this->is_mdns_pkt(buffer) == false)
+				{
+#ifdef DEBUG
+					std::cerr << "Not an mDNS packet" << std::endl;
+#endif
+					continue;
+				}
+
+#ifdef DEBUG
+				fprintf(stderr, "printing bytes (%ld bytes)\n", bytes);
+				for (int i = 0; i < (int)bytes; ++i)
+				{
+					fprintf(stderr, "\\x%02hhx", buffer[i]);
+				}
+				fprintf(stderr, "\n");
+#endif
 				buffer[bytes] = 0;
-				mdns_start = (buffer + sizeof(struct udphdr));
+				mdns_start = ((char *)buffer + sizeof(struct iphdr) + sizeof(struct udphdr));
 				this->mdns_handle_packet((void *)mdns_start, (size_t)bytes);
 			}
 		}
+		else
+		{
+			/* do other stuff in the meantime */
+		}
 
+#ifdef DEBUG
+		return 0;
+#endif
 		this->check_cached_records();
 	}
 }
 
 int serviceDiscoverer::mdns_query_service(const char *hostname)
 {
-	char *encoded = this->encode_name((char *)hostname);
+	char *encoded;
+	struct iphdr iphdr;
+	struct udphdr udphdr;
+	struct mdns_hdr hdr;
+	size_t len;
+	size_t enc_len;
 	uint16_t klass;
 	uint16_t type;
-	struct udphdr udphdr;
 
+	encoded = this->encode_name((char *)hostname);
 	if (!encoded)
 		return -1;
 
-	struct mdns_hdr hdr;
-	size_t enc_len = strlen(encoded);
+	enc_len = strlen(encoded);
+
+	clear_struct(&iphdr);
+
+	iphdr.version = 4;
+	iphdr.ihl = 5;
+	iphdr.tos = 0;
+
+	iphdr.id = this->new_txid();
+	iphdr.frag_off = 0;
+	iphdr.ttl = 255;
+	iphdr.protocol = IPPROTO_UDP;
+	iphdr.check = 0;
+	iphdr.saddr = this->local_ifaddr.sin_addr.s_addr;
+
+	struct in_addr mcast_in;
+	inet_aton(mDNS_MULTICAST, &mcast_in);
+	iphdr.daddr = mcast_in.s_addr;
 
 	clear_struct(&udphdr);
 
 	udphdr.source = htons(this->port);
 	udphdr.dest = htons(mDNS_PORT);
-	udphdr.len = htons(8 + sizeof(hdr) + strlen(encoded) + 1 + 4);
+
+	len = 8 + sizeof(hdr) + enc_len + 1 + 4;
+	udphdr.len = htons(len);
+
+	len += sizeof(iphdr);
+	iphdr.tot_len = htons(len);
 
 	clear_struct(&hdr);
 	hdr.txid = this->new_txid();
@@ -586,6 +759,8 @@ int serviceDiscoverer::mdns_query_service(const char *hostname)
 	memset(tmp, 0, 1024);
 	t = tmp;
 
+	memcpy((void *)t, &iphdr, sizeof(iphdr));
+	t += sizeof(iphdr);
 	memcpy((void *)t, &udphdr, sizeof(udphdr));
 	t += sizeof(udphdr);
 	memcpy((void *)t, &hdr, sizeof(hdr));
@@ -618,6 +793,7 @@ int serviceDiscoverer::mdns_query_service(const char *hostname)
 #endif
 
 	this->time_last_service_query = time(NULL);
+
 	free(encoded);
 	encoded = NULL;
 
@@ -641,6 +817,7 @@ int
 main(void)
 {
 	serviceDiscoverer *sd = new serviceDiscoverer();
+	std::cerr << "sending query for _ipp._tcp.local" << std::endl;
 	sd->mdns_query_service((const char *)"_ipp._tcp.local");
 	sd->mdns_listen();
 
