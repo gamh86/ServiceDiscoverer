@@ -64,7 +64,8 @@ class serviceDiscoverer
 
 	~serviceDiscoverer();
 
-	int mdns_query_service(const char *service_name);
+	int mdns_query_service(std::string);
+	int mdns_query_all_services(void);
 	int mdns_listen(void);
 
 	private:
@@ -73,9 +74,12 @@ class serviceDiscoverer
 	int mdns_handle_packet(void *, size_t);
 	int mdns_handle_response_packet(void *, size_t);
 
+	void default_iphdr(struct iphdr *);
+	void default_udphdr(struct udphdr *);
+
 	off_t label_get_offset(char *);
 	int decode_name(void *, char *, char *);
-	char *encode_name(char *);
+	std::string encode_name(std::string);
 
 	bool cached_record_is_stale(struct mdns_record&);
 	void check_cached_records(void);
@@ -98,7 +102,8 @@ class serviceDiscoverer
 		{ "PTR", 12 }, /* pointer record */
 		{ "TXT", 16 }, /* text record */
 		{ "SRV", 33 }, /* services record */
-		{ "NSEC", 47 }
+		{ "NSEC", 47 },
+		{ "ANY", 255 }
 	};
 
 	std::map<const char *,uint16_t> mdns_classes =
@@ -109,8 +114,19 @@ class serviceDiscoverer
 	std::list<std::string> services =
 	{
 		"_ipp._tcp.local",
-		"_printer._sub._tcp.local",
-		"_ntp._tcp.local"
+		"_http._tcp.local",
+		"_p2pchat._tcp.local",
+		"_ftp._tcp.local",
+		"_webdav._tcp.local",
+		"_imap._tcp.local",
+		"_pop3._tcp.local",
+		"_domain._udp.local",
+		"_ntp._udp.local",
+		"_printer._tcp.local",
+		"_ipp._tcp.local",
+		"_ipps._tcp.local",
+		"_daap._tcp.local",
+		"_pulse-server._tcp.local"
 	};
 
 	int sock;
@@ -165,39 +181,37 @@ off_t serviceDiscoverer::label_get_offset(char *p)
 	return ((((unsigned char)*p * 0x100) + *(p+1)) - DNS_LABEL_OFFSET_BIAS);
 }
 
-char *serviceDiscoverer::encode_name(char *name)
+std::string serviceDiscoverer::encode_name(std::string name)
 {
-	size_t len = strlen(name);
-	char *encoded_name = (char *)calloc(len * 2, 1);
-	char *tmp = (char *)calloc(len + 2, 1);
-	int i;
+	char *encoded = (char *)calloc(1024, 1);
+	char *tmp = (char *)calloc(1024, 1);
 	char *dot;
 	char *p;
 	char *e;
+	int i;
+	size_t len;
 
-	if (!tmp)
+	if (!tmp || !encoded)
 	{
-		std::cerr << __func__ << ": failed to allocate memory for tmp var (" << strerror(errno) << ")" << std::endl;
+		std::cerr << __func__ << ": failed to allocate memory for encoded and or tmp" << std::endl;
 		return NULL;
 	}
 
-	if (!encoded_name)
-	{
-		std::cerr << __func__ << ": failed to allocate memory for encoded name (" << strerror(errno) << ")" << std::endl;
-		return NULL;
-	}
-
-	strcpy(tmp, name);
+	strcpy(tmp, name.data());
 	strcat(tmp, ".");
+#ifdef DEBUG
+	std::cerr << "tmp: " << tmp << std::endl;
+#endif
 
-	e = (tmp + strlen(tmp));
-
+	len = strlen(tmp);
+	e = tmp + len;
 	p = tmp;
+
 	i = 0;
 
 	while (true)
 	{
-		dot = memchr((void *)p, '.', (size_t)(e - p));
+		dot = memchr(p, '.', (e - p));
 
 /*
  * We should always find a dot at the end
@@ -205,12 +219,12 @@ char *serviceDiscoverer::encode_name(char *name)
  */
 		if (!dot)
 		{
-			std::cerr << __func__ << ": failed to find '.' char in name" << std::endl;
+			std::cerr << __func__ << ": failed to find '.' char in name string" << std::endl;
 			return NULL;
 		}
 
-		encoded_name[i++] = (unsigned char)(dot - p);
-		memcpy((void *)&encoded_name[i], (void *)p, (dot - p));
+		encoded[i++] = (unsigned char)(dot - p);
+		memcpy((void *)&encoded[i], (void *)p, (dot - p));
 		i += (dot - p);
 
 		p = ++dot;
@@ -219,10 +233,22 @@ char *serviceDiscoverer::encode_name(char *name)
 			break;
 	}
 
-	free(tmp);
-	tmp = NULL;
+	encoded[i] = 0;
 
-	return encoded_name;
+	std::string _encoded = encoded;
+
+	len = i;
+	for (i = 0; i < len; ++i)
+		fprintf(stderr, "\\x%02hhx", encoded[i]);
+	fprintf(stderr, "\n");
+
+	free(tmp);
+	free(encoded);
+
+#ifdef DEBUG
+	std::cerr << "Encoded: " << _encoded << std::endl;
+#endif
+	return _encoded;
 }
 
 #define LABEL_JUMP_INDICATOR 0xc0
@@ -690,9 +716,109 @@ int serviceDiscoverer::mdns_listen(void)
 	}
 }
 
-int serviceDiscoverer::mdns_query_service(const char *hostname)
+void serviceDiscoverer::default_iphdr(struct iphdr *ip)
 {
-	char *encoded;
+	ip->version = 4;
+	ip->ihl = 5;
+	ip->tos = 0;
+	ip->id = htons(this->new_txid());
+	ip->frag_off = 0;
+	ip->ttl = 255;
+	ip->protocol = IPPROTO_UDP;
+	ip->check = 0;
+	ip->saddr = this->local_ifaddr.sin_addr.s_addr;
+	ip->daddr = this->mdns_addr.sin_addr.s_addr;
+
+	return;
+}
+
+void serviceDiscoverer::default_udphdr(struct udphdr *udp)
+{
+	udp->source = htons(this->port);
+	udp->dest = htons(mDNS_PORT);
+	udp->check = 0;
+}
+
+int serviceDiscoverer::mdns_query_all_services(void)
+{
+	struct iphdr *ip;
+	struct udphdr *udp;
+	struct mdns_hdr *mdns;
+	//char *encoded_name = NULL;
+	std::string encoded_name;
+	size_t mdns_size = 0;
+	int nr_qs = 0;
+	char *buffer = (char *)calloc(32768, 1);
+	char *b = buffer;
+	uint16_t type = htons(this->mdns_types["ANY"]);
+	uint16_t klass = htons(this->mdns_classes["IN"]);
+	size_t len;
+
+	if (!buffer)
+	{
+		std::cerr << __func__ << ": failed to allocate memory for buffer (" << strerror(errno) << ")" << std::endl;
+		return -1;
+	}
+
+	memset(buffer, 0, 32768);
+	ip = (struct iphdr *)buffer;
+	udp = (struct udphdr *)((char *)buffer + sizeof(*ip));
+	mdns = (struct mdns_hdr *)((char *)udp + sizeof(*udp));
+
+	this->default_iphdr(ip);
+	this->default_udphdr(udp);
+
+	mdns->txid = htons(this->new_txid());
+
+	b = buffer + sizeof(*ip) + sizeof(*udp) + sizeof(*mdns);
+
+	for (std::list<std::string>::iterator list_iter = this->services.begin();
+			list_iter != this->services.end();
+			++list_iter)
+	{
+#ifdef DEBUG
+		std::cerr << "Encoding name " << *list_iter << std::endl;
+#endif
+		encoded_name = this->encode_name(*list_iter);
+#ifdef DEBUG
+		std::cerr << "Got back: " << encoded_name << std::endl;
+#endif
+
+		len = encoded_name.length();
+		memcpy(b, encoded_name.data(), len);
+
+		b += len;
+		*b++ = 0;
+		memcpy(b, &type, 2);
+		b += 2;
+		memcpy(b, &klass, 2);
+		b += 2;
+
+		++nr_qs;
+	}
+
+	*b = 0;
+	len = (size_t)((char *)b - (char *)buffer);
+	ip->tot_len = htons(len);
+	udp->len = htons(len - sizeof(iphdr));
+	mdns->nr_qs = htons(nr_qs);
+
+	ssize_t bytes;
+
+#ifdef DEBUG
+	std::cerr << "Sending packet of size " << len << " bytes:\n" << std::endl;
+	for (int i = 0; i < len; ++i)
+		fprintf(stderr, "\\x%02hhx", buffer[i]);
+	fprintf(stderr, "\n");
+#endif
+
+	bytes = sendto(this->sock, buffer, len, 0, (struct sockaddr *)&this->mdns_addr, (socklen_t)sizeof(this->mdns_addr));
+	return 0;
+}
+
+int serviceDiscoverer::mdns_query_service(std::string hostname)
+{
+	std::string encoded;
 	struct iphdr iphdr;
 	struct udphdr udphdr;
 	struct mdns_hdr hdr;
@@ -701,11 +827,8 @@ int serviceDiscoverer::mdns_query_service(const char *hostname)
 	uint16_t klass;
 	uint16_t type;
 
-	encoded = this->encode_name((char *)hostname);
-	if (!encoded)
-		return -1;
-
-	enc_len = strlen(encoded);
+	encoded = this->encode_name(hostname);
+	enc_len = encoded.length();
 
 	clear_struct(&iphdr);
 
@@ -758,7 +881,7 @@ int serviceDiscoverer::mdns_query_service(const char *hostname)
 /*
  * We want to keep the NULL byte at the end.
  */
-	memcpy((void *)t, (void *)encoded, enc_len+1);
+	memcpy((void *)t, (void *)encoded.data(), enc_len+1);
 	t += enc_len+1;
 
 	type = htons(this->mdns_types["SRV"]);
@@ -783,9 +906,6 @@ int serviceDiscoverer::mdns_query_service(const char *hostname)
 
 	this->time_last_service_query = time(NULL);
 
-	free(encoded);
-	encoded = NULL;
-
 	free(tmp);
 	tmp = NULL;
 
@@ -796,9 +916,6 @@ int serviceDiscoverer::mdns_query_service(const char *hostname)
 	if (tmp)
 		free(tmp);
 
-	if (encoded)
-		free(encoded);
-
 	return -1;
 }
 
@@ -806,9 +923,8 @@ int
 main(void)
 {
 	serviceDiscoverer *sd = new serviceDiscoverer();
-	std::cerr << "sending query for _ipp._tcp.local" << std::endl;
-	sd->mdns_query_service((const char *)"_ipp._tcp.local");
-	sd->mdns_listen();
+	sd->mdns_query_all_services();
+	//sd->mdns_listen();
 
 	delete sd;
 
