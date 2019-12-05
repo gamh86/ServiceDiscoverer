@@ -78,7 +78,7 @@ class serviceDiscoverer
 	void default_udphdr(struct udphdr *);
 
 	off_t label_get_offset(char *);
-	int decode_name(void *, char *, char *);
+	int decode_name(void *, std::string, char *);
 	std::string encode_name(std::string);
 
 	bool cached_record_is_stale(struct mdns_record&);
@@ -252,7 +252,7 @@ std::string serviceDiscoverer::encode_name(std::string name)
 }
 
 #define LABEL_JUMP_INDICATOR 0xc0
-int serviceDiscoverer::decode_name(void *data, char *dest, char *name)
+int serviceDiscoverer::decode_name(void *data, std::string dest, char *name)
 {
 	bool jumped = false;
 	off_t off;
@@ -280,9 +280,11 @@ int serviceDiscoverer::decode_name(void *data, char *dest, char *name)
 		}
 
 		if ((unsigned char)*ptr < 0x20)
-			dest[didx++] = '.';
+			//dest[didx++] = '.';
+			dest.push_back('.');
 		else
-			dest[didx++] = *ptr;
+			dest.push_back(*ptr);
+			//dest[didx++] = *ptr;
 
 		++ptr;
 
@@ -290,7 +292,7 @@ int serviceDiscoverer::decode_name(void *data, char *dest, char *name)
 			++delta;
 	}
 
-	dest[didx] = 0;
+	//dest[didx] = 0;
 
 /*
  * Either NAME + DELTA == \x00 or NAME + DELTA == 0xCx (start of jump offset)
@@ -417,7 +419,8 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 	struct mdns_record record;
 	char *ptr = (char *)packet + sizeof(struct mdns_hdr);
 	char *e = (char *)packet + size;
-	char *decoded_name = (char *)calloc(512, 1);
+	//char *decoded_name = (char *)calloc(512, 1);
+	std::string decoded_name;
 	int delta;
 	uint16_t type;
 	uint16_t klass;
@@ -437,7 +440,7 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 		if (delta < 0)
 		{
 			std::cerr << __func__ << ": failed to decode name" << std::endl;
-			free(decoded_name);
+			//free(decoded_name);
 			return -1;
 		}
 
@@ -529,7 +532,8 @@ int serviceDiscoverer::mdns_handle_packet(void *packet, size_t size)
 	}
 
 	char *e = ((char *)packet + size);
-	char *decoded_name = (char *)calloc(512, 1);
+	//char *decoded_name = (char *)calloc(512, 1);
+	std::string decoded_name;
 	int delta = 0;
 
 	while (true)
@@ -538,7 +542,7 @@ int serviceDiscoverer::mdns_handle_packet(void *packet, size_t size)
 
 		if (delta < 0)
 		{
-			free(decoded_name);
+			//free(decoded_name);
 			return -1;
 		}
 
@@ -554,12 +558,12 @@ int serviceDiscoverer::mdns_handle_packet(void *packet, size_t size)
 			break;
 	}
 
-	free(decoded_name);
+	//free(decoded_name);
 	return 0;
 
 	fail_free_mem__hmdns:
 
-	free(decoded_name);
+	//free(decoded_name);
 	return -1;
 }
 
