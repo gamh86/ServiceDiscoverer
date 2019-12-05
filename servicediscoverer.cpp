@@ -38,6 +38,14 @@ struct mdns_hdr
 	uint16_t nr_ad;
 } __attribute__((__packed__));
 
+struct mdns_srv_data
+{
+	uint16_t priority;
+	uint16_t weight;
+	uint16_t port;
+	std::string target;
+};
+
 struct mdns_record
 {
 	uint16_t type;
@@ -45,15 +53,8 @@ struct mdns_record
 	uint32_t ttl;
 	uint16_t data_len;
 	time_t cached;
-	void *data;
-};
-
-struct mdns_srv_data
-{
-	uint16_t priority;
-	uint16_t weight;
-	uint16_t port;
-	void *target;
+	std::map<std::string,std::string> *text_data;
+	struct mdns_srv_data srv_data;
 };
 
 class serviceDiscoverer
@@ -73,6 +74,7 @@ class serviceDiscoverer
 	int startup(void);
 	int mdns_handle_packet(void *, size_t);
 	int mdns_handle_response_packet(void *, size_t);
+	std::map<std::string,std::string> *mdns_parse_text_record(void *, size_t);
 
 	void default_iphdr(struct iphdr *);
 	void default_udphdr(struct udphdr *);
@@ -156,12 +158,12 @@ serviceDiscoverer::~serviceDiscoverer()
 			map_iter != this->cached_records.end();
 			++map_iter)
 	{
-		std::list<struct mdns_record> &__list = map_iter->second;
-		for (std::list<struct mdns_record>::iterator list_iter = __list.begin();
-				list_iter != __list.end();
+		for (std::list<struct mdns_record>::iterator list_iter = map_iter->second.begin();
+				list_iter != map_iter->second.end();
 				++list_iter)
 		{
-			free(list_iter->data);
+			if (list_iter->text_data != NULL)
+				delete list_iter->text_data;
 		}
 	}
 }
@@ -405,6 +407,65 @@ const char *serviceDiscoverer::type_str(uint16_t type)
 	return (const char *)"Unknown type";
 }
 
+std::map<std::string,std::string> *serviceDiscoverer::mdns_parse_text_record(void *data, size_t len)
+{
+	char *p = (char *)data;
+	char *end = (char *)data + len;
+	char *e;
+	unsigned char l;
+
+/*
+ * RFC 6763: MUST ignore a text record
+ * that begins with a missing key.
+ */
+	if (((char *)data)[0] == '=')
+		return NULL;
+
+	std::map<std::string,std::string> *__ret = new std::map<std::string,std::string>();
+	std::string key;
+	std::string value;
+
+	while (p < end)
+	{
+		l = (unsigned char)*p;
+		++p;
+		e = (p + l);
+		while (p < e && *p != '=')
+		{
+			key.push_back(*p++);
+		}
+
+		if (*p != '=')
+		{
+			delete __ret;
+			std::cerr << __func__ << ": failed to find '=' separator for key/value pair" << std::endl;
+			return NULL;
+		}
+
+		++p;
+		while (p < e)
+			value.push_back(*p++);
+
+/*
+ * Ignore repeated occurences of keys.
+ */
+		if (__ret->find(key) == __ret->end())
+			__ret->insert(std::pair<std::string,std::string>(key, value));
+	}
+
+#ifdef DEBUG
+	std::cerr << "Got the following key/value pairs from the text record:\n" << std::endl;
+	for (std::map<std::string,std::string>::iterator map_iter = __ret->begin();
+				map_iter != __ret->end();
+				++map_iter)
+	{
+		std::cerr << map_iter->first << "=" << map_iter->second << std::endl;
+	}
+#endif
+
+	return __ret;
+}
+
 int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 {
 	struct mdns_hdr *hdr = (struct mdns_hdr *)packet;
@@ -413,13 +474,7 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 	char *e = (char *)packet + size;
 	std::string decoded_name;
 	int delta;
-	uint16_t type;
-	uint16_t klass;
-	uint32_t ttl;
 	uint16_t data_len;
-	uint16_t priority;
-	uint16_t weight;
-	void *data = NULL;
 	uint16_t total_answers = 0;
 
 	total_answers += htons(hdr->nr_as) + htons(hdr->nr_aa) + htons(hdr->nr_ad);
@@ -436,26 +491,48 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 		}
 
 		ptr += delta;
-		type = this->get_16bit_val(ptr);
+		record.type = this->get_16bit_val(ptr);
 		ptr += 2;
-		klass = this->get_16bit_val(ptr);
+		record.klass = this->get_16bit_val(ptr);
 		ptr += 2;
-		ttl = this->get_32bit_val(ptr);
+		record.ttl = this->get_32bit_val(ptr);
 		ptr += 4;
-		data_len = this->get_16bit_val(ptr);
+		record.data_len = this->get_16bit_val(ptr);
 		ptr += 2;
-
-		data = calloc((data_len+1), 1);
-		memcpy(data, ptr, data_len);
-		ptr += data_len;
-		clear_struct(&record);
-
-		record.type = type;
-		record.klass = klass;
-		record.ttl = ttl;
-		record.data_len = data_len;
 		record.cached = time(NULL);
-		record.data = data;
+		record.text_data = NULL;
+
+		if (record.type == this->mdns_types["TXT"])
+		{
+			record.text_data = this->mdns_parse_text_record((void *)ptr, (size_t)record.data_len);
+			ptr += record.data_len;
+		}
+		else
+		if (record.type == this->mdns_types["SRV"])
+		{
+			record.srv_data.priority = this->get_16bit_val(ptr);
+			ptr += 2;
+			record.srv_data.weight = this->get_16bit_val(ptr);
+			ptr += 2;
+			record.srv_data.port = this->get_16bit_val(ptr);
+			ptr += 2;
+			record.srv_data.target.append((char *)ptr, (record.data_len - 6));
+
+#ifdef DEBUG
+			std::cerr << "Got the following SRV data:\n" << std::endl;
+			std::cerr << "priority=" << record.srv_data.priority << std::endl;
+			std::cerr << "weight=" << record.srv_data.weight << std::endl;
+			std::cerr << "port=" << record.srv_data.port << std::endl;
+			std::cerr << "target=" << record.srv_data.target << std::endl;
+#endif
+		}
+		else
+		{
+/*
+ * For the timebeing, just ignore other types.
+ */
+			ptr += record.data_len;
+		}
 
 		std::cout << "Service: " << decoded_name << std::endl;
 
@@ -480,13 +557,14 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 			{
 				if (list_iter->type == record.type && list_iter->klass == record.klass)
 				{
-					if (this->cached_record_is_stale(*list_iter) == true || this->should_flush_cache(klass) == true)
+					if (this->cached_record_is_stale(*list_iter) == true || this->should_flush_cache(record.klass) == true)
 					{
-						free(list_iter->data);
-						//__list.erase(list_iter);
+						if (list_iter->text_data != NULL)
+							delete list_iter->text_data;
+
 						map_iter->second.erase(list_iter);
 						map_iter->second.push_back(record);
-						//__list.push_back(record);
+
 						std::cout << "Record for \"" << decoded_name << "\" is stale: removing from cache" << std::endl;
 						std::cout << "Cached fresh record for \"" << decoded_name << "\" exists" << std::endl;
 					}
@@ -497,15 +575,15 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 
 			if (!no_cache)
 			{
-				//this->cached_records.push_back(record);
-				//__list.push_back(record);
 				map_iter->second.push_back(record);
 				std::cout << "Cached record for \"" << decoded_name << "\" exists" << std::endl;
 			}
 			else
 			{
-				free(data);
-				data = NULL;
+				if (record.text_data != NULL)
+					delete record.text_data;
+
+				record.text_data = NULL;
 			}
 		}
 
