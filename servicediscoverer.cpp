@@ -662,20 +662,13 @@ int serviceDiscoverer::mdns_listen(void)
 				bytes = recv(this->sock, buffer, buffer_size, 0);
 				if (this->is_udp_pkt(buffer) == false)
 				{
-#ifdef DEBUG
-					std::cerr << "Not a UDP packet" << std::endl;
-#endif
 					continue;
 				}
 
 				if (this->is_mdns_pkt(buffer) == false)
 				{
-#ifdef DEBUG
-					std::cerr << "Not an mDNS packet" << std::endl;
-#endif
 					continue;
 				}
-
 #ifdef DEBUG
 				fprintf(stderr, "printing bytes (%ld bytes)\n", bytes);
 				for (int i = 0; i < (int)bytes; ++i)
@@ -693,10 +686,6 @@ int serviceDiscoverer::mdns_listen(void)
 		{
 			/* do other stuff in the meantime */
 		}
-
-#ifdef DEBUG
-		return 0;
-#endif
 		this->check_cached_records();
 	}
 }
