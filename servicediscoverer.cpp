@@ -80,7 +80,7 @@ class serviceDiscoverer
 	void default_udphdr(struct udphdr *);
 
 	off_t label_get_offset(char *);
-	int decode_name(void *, std::string, char *);
+	std::string decode_name(void *, char *, int *);
 	std::string encode_name(std::string);
 
 	bool cached_record_is_stale(struct mdns_record&);
@@ -243,13 +243,14 @@ std::string serviceDiscoverer::encode_name(std::string name)
 }
 
 #define LABEL_JUMP_INDICATOR 0xc0
-int serviceDiscoverer::decode_name(void *data, std::string dest, char *name)
+std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 {
 	bool jumped = false;
 	off_t off;
 	char *ptr;
 	int didx = 0;
 	int delta = 0;
+	std::string decoded;
 
 	ptr = name;
 	if ((unsigned char)*ptr < 0x20)
@@ -271,11 +272,9 @@ int serviceDiscoverer::decode_name(void *data, std::string dest, char *name)
 		}
 
 		if ((unsigned char)*ptr < 0x20)
-			//dest[didx++] = '.';
-			dest.push_back('.');
+			decoded.push_back('.');
 		else
-			dest.push_back(*ptr);
-			//dest[didx++] = *ptr;
+			decoded.push_back(*ptr);
 
 		++ptr;
 
@@ -293,7 +292,9 @@ int serviceDiscoverer::decode_name(void *data, std::string dest, char *name)
 	else
 		++delta;
 
-	return delta;
+	*_delta = delta;
+
+	return decoded;
 }
 
 void serviceDiscoverer::check_cached_records(void)
@@ -481,7 +482,7 @@ int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
 
 	while (true)
 	{
-		delta = this->decode_name(packet, decoded_name, ptr);
+		decoded_name = this->decode_name(packet, ptr, &delta);
 
 		if (delta < 0)
 		{
@@ -604,8 +605,9 @@ int serviceDiscoverer::mdns_handle_packet(void *packet, size_t size)
 	uint16_t type;
 	uint16_t klass;
 
-	if (this->is_response(hdr->flags) == true)
+	if (this->is_response(htons(hdr->flags)) == true)
 	{
+		std::cerr << "Handling mDNS response packet" << std::endl;
 		return (this->mdns_handle_response_packet(packet, size));
 	}
 
@@ -616,7 +618,7 @@ int serviceDiscoverer::mdns_handle_packet(void *packet, size_t size)
 
 	while (true)
 	{
-		delta = this->decode_name(packet, decoded_name, ptr);
+		decoded_name = this->decode_name(packet, ptr, &delta);
 
 		if (delta < 0)
 		{
