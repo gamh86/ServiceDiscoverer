@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <algorithm>
 #include <iostream>
 #include <list>
 #include <map>
@@ -24,6 +25,7 @@
 #define mDNS_MAX_PACKET_SIZE 9000 /* includes ip hdr, udp hdr and dns hdr: RFC 6762 */
 
 #define clear_struct(s) memset((s), 0, sizeof((*s)))
+#define calc_offset(from, at) (off_t)((char *)(at) - (char *)(from))
 
 struct mdns_hdr
 {
@@ -61,6 +63,12 @@ struct mdns_record
 	std::string domain_name;
 };
 
+struct label
+{
+	std::string name;
+	off_t offset;
+};
+
 class serviceDiscoverer
 {
 	public:
@@ -84,6 +92,7 @@ class serviceDiscoverer
 	int mdns_parse_additional(void *, size_t, void *, uint16_t);
 	void mdns_print_record(std::string, struct mdns_record&);
 	std::map<std::string,std::string> *mdns_parse_text_record(void *, size_t);
+	std::list<std::string> tokenize_name(std::string, char);
 
 	bool should_replace_file(void);
 	bool should_do_query(void);
@@ -1243,12 +1252,48 @@ void serviceDiscoverer::default_udphdr(struct udphdr *udp)
 	udp->check = 0;
 }
 
+std::list<std::string> serviceDiscoverer::tokenize_name(std::string name, char c)
+{
+	char *p;
+	char *e;
+	char *sep;
+
+	std::list<std::string> list;
+	std::string tmp = name;
+	std::string token;
+	tmp.push_back(c);
+
+	p = tmp.data();
+	e = (p + tmp.length());
+
+	while (true)
+	{
+		sep = memchr(p, c, (e - p));
+		if (!sep)
+		{
+			errno = EPROTO;
+			_error("failed to find separator in name");
+			return NULL;
+		}
+
+		token.clear();
+		token.append(p, (sep - p));
+		list.push_back(token);
+
+		p = ++sep;
+
+		if (p >= e)
+			break;
+	}
+
+	return list;
+}
+
 int serviceDiscoverer::mdns_query_all_services(void)
 {
 	struct iphdr *ip;
 	struct udphdr *udp;
 	struct mdns_hdr *mdns;
-	//char *encoded_name = NULL;
 	std::string encoded_name;
 	size_t mdns_size = 0;
 	int nr_qs = 0;
@@ -1271,22 +1316,48 @@ int serviceDiscoverer::mdns_query_all_services(void)
 
 	this->default_iphdr(ip);
 	this->default_udphdr(udp);
-
 	mdns->txid = htons(this->new_txid());
-
 	b = buffer + sizeof(*ip) + sizeof(*udp) + sizeof(*mdns);
+
+	std::map<std::string,uint16_t> label_cache;
+	std::string tmp_string;
 
 	for (std::list<std::string>::iterator list_iter = this->services.begin();
 			list_iter != this->services.end();
 			++list_iter)
 	{
-		encoded_name = this->encode_name(*list_iter);
+		tmp_string.clear();
+		tmp_string.append(list_iter->data(), list_iter->length());
+		tmp_string.push_back('.');
 
-		len = encoded_name.length();
-		memcpy(b, encoded_name.data(), len);
+		p = tmp_string.data();
+		e = (p + tmp_string.length());
 
-		b += len;
-		*b++ = 0;
+		std::list<std::string> tokens = this->tokenize_name(*list_iter, '.');
+
+		for (std::list<std::string>::iterator iter = tokens.begin();
+				iter != tokens.end();
+				++iter)
+		{
+			std::list<std::string,uint16_t>::iterator lc_iter = label_cache.find(*iter);
+			if (lc_iter != label_cache.end())
+			{
+				uint16_t _off = htons(lc_iter->second);
+				unsigned char *__uc = (unsigned char *)&_off;
+				*__uc |= (unsigned char)LABEL_JUMP_INDICATOR;
+				memcpy(b, &_off, 2);
+				b += 2;
+			}
+			else
+			{
+				uint16_t _off = (uint16_t)calc_offset(mdns, b);
+				label_cache.insert(std::pair<std::string,uint16_t>(*iter, _off));
+				*b++ = (char)iter->length();
+				iter->copy(b, token.length());
+				b += iter->length();
+			}
+		}
+
 		memcpy(b, &type, 2);
 		b += 2;
 		memcpy(b, &klass, 2);
@@ -1296,7 +1367,8 @@ int serviceDiscoverer::mdns_query_all_services(void)
 	}
 
 	*b = 0;
-	len = (size_t)((char *)b - (char *)buffer);
+
+	len = (size_t)calc_offset(buffer, b);
 	ip->tot_len = htons(len);
 	udp->len = htons(len - sizeof(iphdr));
 	mdns->nr_qs = htons(nr_qs);
