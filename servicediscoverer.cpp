@@ -10,12 +10,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include <algorithm>
 #include <iostream>
 #include <list>
 #include <map>
@@ -26,6 +26,7 @@
 
 #define clear_struct(s) memset((s), 0, sizeof((*s)))
 #define calc_offset(from, at) (off_t)((char *)(at) - (char *)(from))
+#define error(msg) std::cerr << __func__ << ": " << (msg) << " (" << strerror(errno) << ")" << std::endl
 
 struct mdns_hdr
 {
@@ -161,7 +162,7 @@ class serviceDiscoverer
 	struct sockaddr_in local_ifaddr;
 
 	time_t time_last_service_query;
-	time_t time_pushed_to_disk;
+	time_t time_next_disk_push;
 	int query_interval = 120; /* seconds */
 	int disk_push_interval = 600; /* seconds */
 
@@ -236,7 +237,7 @@ std::string serviceDiscoverer::encode_name(std::string name)
 
 	while (true)
 	{
-		dot = memchr(p, '.', (e - p));
+		dot = (char *)memchr(p, '.', (e - p));
 
 /*
  * We should always find a dot at the end
@@ -504,10 +505,10 @@ void serviceDiscoverer::mdns_save_cached_records(void)
 			map_iter != this->cached_records.end();
 			++map_iter)
 	{
-		if (!map_iter->first.length())
+		if (map_iter->second.empty() || map_iter->first.length() < 3)
 			continue;
 
-		fprintf(fp, " Records for host  %s\n\n", map_iter->first.data());
+		fprintf(fp, " Records for \"%s\"\n\n", map_iter->first.data());
 
 		for (std::list<struct mdns_record>::iterator list_iter = map_iter->second.begin();
 				list_iter != map_iter->second.end();
@@ -525,7 +526,7 @@ void serviceDiscoverer::mdns_save_cached_records(void)
 			if (list_iter->type == this->mdns_types["A"])
 			{
 				fprintf(fp,
-						" Address       %s\n",
+						" Address       %s\n\n",
 						inet_ntoa(list_iter->inet4));
 			}
 			else
@@ -544,11 +545,12 @@ void serviceDiscoverer::mdns_save_cached_records(void)
 			else
 			if (list_iter->type == this->mdns_types["TXT"])
 			{
+				fprintf(fp, " Text-Record Key/Value pairs\n\n");
 				for (std::map<std::string,std::string>::iterator _list_iter = list_iter->text_data->begin();
 						_list_iter != list_iter->text_data->end();
 						++_list_iter)
 				{
-					fprintf(fp, "%s=%s\n", _list_iter->first.data(), _list_iter->second.data());
+					fprintf(fp, " %s=%s\n", _list_iter->first.data(), _list_iter->second.data());
 				}
 
 				fprintf(fp, "\n");
@@ -588,7 +590,7 @@ void serviceDiscoverer::mdns_print_record(std::string host, struct mdns_record& 
 	if (record.type == this->mdns_types["A"])
 	{
 		fprintf(stdout,
-			" Address       %s\n",
+			" Address       %s\n\n",
 			inet_ntoa(record.inet4));
 	}
 	else
@@ -601,23 +603,26 @@ void serviceDiscoverer::mdns_print_record(std::string host, struct mdns_record& 
 			record.srv_data.priority,
 			record.srv_data.weight,
 			record.srv_data.port);
-		std::cout << " Target        " << record.srv_data.target << std::endl;
+		std::cout << " Target        " << record.srv_data.target << "\n" << std::endl;
 	}
 	else
 	if (record.type == this->mdns_types["TXT"] && record.text_data != NULL)
 	{
+		fprintf(stdout, " Text-Record Key/Value pairs\n\n");
 		for (std::map<std::string,std::string>::iterator map_iter = record.text_data->begin();
 				map_iter != record.text_data->end();
 				++map_iter)
 		{
-			fprintf(stdout, "%s=%s\n", map_iter->first.data(), map_iter->second.data());
+			fprintf(stdout, " %s=%s\n", map_iter->first.data(), map_iter->second.data());
 		}
+
+		fprintf(stdout, "\n");
 	}
 	else
 	if (record.type == this->mdns_types["PTR"])
 	{
 		fprintf(stdout,
-			" Domain Name   %s\n",
+			" Domain Name   %s\n\n",
 			record.domain_name.data());
 	}
 
@@ -676,7 +681,7 @@ std::map<std::string,std::string> *serviceDiscoverer::mdns_parse_text_record(voi
 			return NULL;
 		}
 
-		eq = memchr(p, '=', (e - p));
+		eq = (char *)memchr(p, '=', (e - p));
 
 #if 0
 /*
@@ -1143,7 +1148,7 @@ int serviceDiscoverer::startup(void)
 	inet_aton(mDNS_MULTICAST, &this->mdns_addr.sin_addr);
 	this->mdns_addr.sin_port = htons(5353);
 
-	this->time_pushed_to_disk = (time(NULL) + this->disk_push_interval);
+	this->time_next_disk_push = (time(NULL) + this->disk_push_interval);
 	this->time_last_service_query = 0;
 
 	return 0;
@@ -1151,10 +1156,15 @@ int serviceDiscoverer::startup(void)
 
 bool serviceDiscoverer::should_replace_file(void)
 {
-	if ((time(NULL) - this->time_pushed_to_disk) >= this->disk_push_interval)
+	if ((time(NULL) - this->time_next_disk_push) >= this->disk_push_interval)
+	{
+		this->time_next_disk_push = (time(NULL) + this->disk_push_interval);
 		return true;
+	}
 	else
+	{
 		return false;
+	}
 }
 
 bool serviceDiscoverer::should_do_query(void)
@@ -1268,12 +1278,12 @@ std::list<std::string> serviceDiscoverer::tokenize_name(std::string name, char c
 
 	while (true)
 	{
-		sep = memchr(p, c, (e - p));
+		sep = (char *)memchr(p, c, (e - p));
 		if (!sep)
 		{
 			errno = EPROTO;
-			_error("failed to find separator in name");
-			return NULL;
+			error("failed to find separator in name");
+			return list;
 		}
 
 		token.clear();
@@ -1305,7 +1315,7 @@ int serviceDiscoverer::mdns_query_all_services(void)
 
 	if (!buffer)
 	{
-		std::cerr << __func__ << ": failed to allocate memory for buffer (" << strerror(errno) << ")" << std::endl;
+		error("failed to allocate memory for buffer");
 		return -1;
 	}
 
@@ -1330,16 +1340,19 @@ int serviceDiscoverer::mdns_query_all_services(void)
 		tmp_string.append(list_iter->data(), list_iter->length());
 		tmp_string.push_back('.');
 
-		p = tmp_string.data();
-		e = (p + tmp_string.length());
+		std::list<std::string> tokens = this->tokenize_name(tmp_string, '.');
 
-		std::list<std::string> tokens = this->tokenize_name(*list_iter, '.');
+		if (tokens.empty())
+		{
+			std::cerr << __func__ << ": failed to tokenize \"" << *list_iter << "\"" << std::endl;
+			continue;
+		}
 
 		for (std::list<std::string>::iterator iter = tokens.begin();
 				iter != tokens.end();
 				++iter)
 		{
-			std::list<std::string,uint16_t>::iterator lc_iter = label_cache.find(*iter);
+			std::map<std::string,uint16_t>::iterator lc_iter = label_cache.find(*iter);
 			if (lc_iter != label_cache.end())
 			{
 				uint16_t _off = htons(lc_iter->second);
@@ -1347,13 +1360,15 @@ int serviceDiscoverer::mdns_query_all_services(void)
 				*__uc |= (unsigned char)LABEL_JUMP_INDICATOR;
 				memcpy(b, &_off, 2);
 				b += 2;
+
+				break;
 			}
 			else
 			{
 				uint16_t _off = (uint16_t)calc_offset(mdns, b);
 				label_cache.insert(std::pair<std::string,uint16_t>(*iter, _off));
 				*b++ = (char)iter->length();
-				iter->copy(b, token.length());
+				iter->copy(b, iter->length());
 				b += iter->length();
 			}
 		}
@@ -1370,7 +1385,7 @@ int serviceDiscoverer::mdns_query_all_services(void)
 
 	len = (size_t)calc_offset(buffer, b);
 	ip->tot_len = htons(len);
-	udp->len = htons(len - sizeof(iphdr));
+	udp->len = htons(len - sizeof(*ip));
 	mdns->nr_qs = htons(nr_qs);
 
 	ssize_t bytes;
@@ -1468,7 +1483,7 @@ int serviceDiscoverer::mdns_query_service(std::string hostname)
 	bytes = sendto(this->sock, tmp, (t - tmp), 0, (struct sockaddr *)&this->mdns_addr, (socklen_t)sizeof(this->mdns_addr));
 	if (bytes <= 0)
 	{
-		std::cerr << __func__ << ": failed to send mDNS packet (" << strerror(errno) << ")" << std::endl;
+		error("failed to send mDNS packet");
 		goto fail_free_mem__mdnsq;
 	}
 
@@ -1491,10 +1506,28 @@ int serviceDiscoverer::mdns_query_service(std::string hostname)
 	return -1;
 }
 
+static serviceDiscoverer *sd = NULL;
+
+static void
+clean_up(int signo)
+{
+	if (signo != SIGINT && signo != SIGQUIT)
+		return;
+
+	if (sd != NULL)
+		delete sd;
+
+	std::cerr << "Caught signal (" << signo << ")" << std::endl;
+	exit(signo);
+}
+
 int
 main(void)
 {
-	serviceDiscoverer *sd = new serviceDiscoverer();
+	signal(SIGINT, clean_up);
+	signal(SIGQUIT, clean_up);
+
+	sd = new serviceDiscoverer();
 	sd->mdns_query_all_services();
 	sd->mdns_listen();
 
