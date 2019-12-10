@@ -210,7 +210,7 @@ off_t serviceDiscoverer::label_get_offset(char *p)
 	return ((((unsigned char)*p * 0x100) + *(p+1)) - DNS_LABEL_OFFSET_BIAS);
 }
 
-std::string serviceDiscoverer::encode_name(std::string name)
+std::string serviceDiscoverer::encode_names(std::vector<std::string> names)
 {
 	char *encoded = (char *)calloc(1024, 1);
 	char *tmp = (char *)calloc(1024, 1);
@@ -219,6 +219,9 @@ std::string serviceDiscoverer::encode_name(std::string name)
 	char *e;
 	int i;
 	size_t len;
+	std::map<std::string,uint16_t> label_cache;
+	std::map<std::string,uint16_t>::iterator map_iter;
+	std::string token;
 
 	if (!tmp || !encoded)
 	{
@@ -235,9 +238,22 @@ std::string serviceDiscoverer::encode_name(std::string name)
 
 	i = 0;
 
-	while (true)
+	for (int j = 0; j < names.length(); ++j)
 	{
-		dot = (char *)memchr(p, '.', (e - p));
+		std::string name = names[j];
+
+		strcpy(tmp, name.data());
+		strcat(tmp, ".");
+
+		len = strlen(tmp);
+		e = tmp + len;
+		p = tmp;
+
+		i = 0;
+
+		while (true)
+		{
+			dot = (char *)memchr(p, '.', (e - p));
 
 /*
  * We should always find a dot at the end
@@ -249,14 +265,31 @@ std::string serviceDiscoverer::encode_name(std::string name)
 			return NULL;
 		}
 
-		encoded[i++] = (unsigned char)(dot - p);
-		memcpy((void *)&encoded[i], (void *)p, (dot - p));
-		i += (dot - p);
+		token.clear();
+		token.append(p, (dot - p));
+		if ((map_iter = label_cache.find(token)) != label_cache.end())
+		{
+			uint16_t off = map_iter->second;
+			off |= (0xc0 << 8);
+			memcpy((void *)&encoded[i], (void *)&off, 2);
+			i += 2;
+
+			continue;
+		}
+		else
+		{
+			uint16_t off = (12 + i);
+			label_cache.insert(std::pair<std::string,uint16_t>(token, off));
+			encoded[i++] = (unsigned char)(dot - p);
+			memcpy((void *)&encoded[i], (void *)p, (dot - p));
+			i += (dot - p);
+		}
 
 		p = ++dot;
 
 		if (dot >= e)
 			break;
+		}
 	}
 
 	encoded[i] = 0;
