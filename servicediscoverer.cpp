@@ -258,6 +258,9 @@ std::string serviceDiscoverer::encode_data(std::vector<struct Query> queries)
 	}
 
 	nr_qs = queries.size();
+#ifdef DEBUG
+	std::cerr << "Number of queries to encode: " << nr_qs << std::endl;
+#endif
 	for (int j = 0; j < nr_qs; ++j)
 	{
 		tokens.clear();
@@ -267,8 +270,15 @@ std::string serviceDiscoverer::encode_data(std::vector<struct Query> queries)
 				list_iter != tokens.end();
 				++list_iter)
 		{
+#ifdef DEBUG
+			std::cerr << "Token: " << *list_iter << std::endl;
+			std::cerr << "Length: " << list_iter->length() << std::endl;
+#endif
 			if ((map_iter = label_cache.find(*list_iter)) != label_cache.end())
 			{
+#ifdef DEBUG
+				std::cerr << "Token \"" << *list_iter << "\" already in cache" << std::endl;
+#endif
 				uint16_t off = map_iter->second;
 				off |= (0xc0 << 8);
 				off = htons(off);
@@ -276,14 +286,24 @@ std::string serviceDiscoverer::encode_data(std::vector<struct Query> queries)
 				pos += 2;
 				need_null = false;
 				break;
+#ifdef DEBUG
+				std::cerr << "Current position: " << pos << std::endl;
+#endif
 			}
 			else
 			{
+#ifdef DEBUG
+				std::cerr << "Encoding token \"" << *list_iter << "\"" << std::endl;
+#endif
 				uint16_t off;
 				off = (12 + pos);
 				label_cache.insert(std::pair<std::string,uint16_t>(*list_iter, off));
 				encoded[pos++] = list_iter->length();
 				list_iter->copy((char *)&encoded[pos], list_iter->length(), 0);
+				pos += list_iter->length();
+#ifdef DEBUG
+				std::cerr << "Current position: " << pos << std::endl;
+#endif
 			}
 		}
 
@@ -292,14 +312,17 @@ std::string serviceDiscoverer::encode_data(std::vector<struct Query> queries)
 		else
 			need_null = true;
 
-		memcpy((void *)&encoded[pos], (void *)&queries[j].type, 2);
+		uint16_t type = htons(queries[j].type);
+		uint16_t klass = htons(queries[j].klass);
+		memcpy((void *)&encoded[pos], (void *)&type, 2);
 		pos += 2;
-		memcpy((void *)&encoded[pos], (void *)&queries[j].klass, 2);
+		memcpy((void *)&encoded[pos], (void *)&klass, 2);
 		pos += 2;
 	}
 
 	encoded[pos] = 0;
-	data = encoded;
+
+	data.append(encoded, pos);
 
 	free(tmp);
 	free(encoded);
@@ -1351,12 +1374,12 @@ int serviceDiscoverer::mdns_query_all_services(void)
 	memset(buffer, 0, 32768);
 	ip = (struct iphdr *)buffer;
 	udp = (struct udphdr *)((char *)buffer + sizeof(*ip));
-	mdns = (struct mdns_hdr *)((char *)udp + sizeof(*udp));
+	mdns = (struct mdns_hdr *)((char *)buffer + sizeof(*ip) + sizeof(*udp));
 
 	this->default_iphdr(ip);
 	this->default_udphdr(udp);
 	mdns->txid = htons(this->new_txid());
-	b = buffer + sizeof(*ip) + sizeof(*udp) + sizeof(*mdns);
+	b = (char *)buffer + sizeof(*ip) + sizeof(*udp) + sizeof(*mdns);
 
 	data = this->encode_data(this->services);
 	ptr = (char *)data.data();
@@ -1364,9 +1387,16 @@ int serviceDiscoverer::mdns_query_all_services(void)
 	b += data.length();
 	*b = 0;
 
-	ip->tot_len = (uint16_t)htons(calc_offset(buffer, b));
-	udp->len = (uint16_t)(ntohs(ip->tot_len) - 20);
-	mdns->nr_qs = this->services.size();
+	len = calc_offset(buffer, b);
+	ip->tot_len = (uint16_t)htons(len);
+	udp->len = (uint16_t)htons(len - 20);
+	mdns->nr_qs = htons(this->services.size());
+
+#ifdef DEBUG
+	std::cerr << "Total length: " << ntohs(ip->tot_len) << std::endl;
+	std::cerr << "UDP length: " << ntohs(udp->len) << std::endl;
+	std::cerr << "MDNS Data length: " << data.length() << std::endl;
+#endif
 
 #if 0
 	for (std::list<std::string>::iterator list_iter = this->services.begin();
