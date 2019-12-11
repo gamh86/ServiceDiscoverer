@@ -62,6 +62,7 @@ struct mdns_record
 	std::map<std::string,std::string> *text_data;
 	struct mdns_srv_data srv_data;
 	struct in_addr inet4;
+	struct in6_addr inet6;
 	std::string domain_name;
 };
 
@@ -127,9 +128,10 @@ class serviceDiscoverer
 
 	std::map<const char *,uint16_t> mdns_types =
 	{
-		{ "A", 1 }, /* host address */
+		{ "A", 1 }, /* ipv4 record */
 		{ "PTR", 12 }, /* pointer record */
 		{ "TXT", 16 }, /* text record */
+		{ "AAAA", 28 }, /* ipv6 record */
 		{ "SRV", 33 }, /* services record */
 		{ "NSEC", 47 },
 		{ "ANY", 255 }
@@ -219,13 +221,14 @@ uint16_t serviceDiscoverer::new_txid(void)
 	return (uint16_t)((rand() >> 16) & 0xffff);
 }
 
+#define DNS_LABEL_OFFSET_BIAS (0x100 * 0xc0)
 off_t serviceDiscoverer::label_get_offset(char *p)
 {
 /*
  * ALWAYS remember it MUST be unsigned char, or you'll
  * get a NEGATIVE result for *p * 0x100 !
  */
-	return ((((unsigned char)*p * 0x100) & ~(0xc0)) + *(p+1));
+	return ((((unsigned char)*p * 0x100) + (unsigned char)*(p+1)) - DNS_LABEL_OFFSET_BIAS);
 }
 
 std::string serviceDiscoverer::encode_data(std::vector<struct Query> queries)
@@ -346,14 +349,14 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 	for (int i = 0; i < 10; ++i)
 		fprintf(stderr, "\\x%02hhx", name[i]);
 	fprintf(stderr, "\n");
-	std::cerr << "(this is " << (name - (char *)data) << " bytes from start of data" << std::endl;
+	std::cerr << "(this is " << (name - (char *)data) << " bytes from start of data)" << std::endl;
 #endif
 	ptr = name;
 
+	decoded.clear();
 	while (true)
 	{
-		len = (unsigned char)*ptr++;
-		++delta;
+		len = (unsigned char)*ptr;
 
 		if (!len)
 			break;
@@ -369,7 +372,7 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 #endif
 			off = this->label_get_offset(ptr);
 #ifdef DEBUG
-			std::cerr << "Jump to start of mDNS packet + " << (unsigned char)off << " bytes" << std::endl;
+			std::cerr << "Jump to start of mDNS packet + " << off << " bytes" << std::endl;
 #endif
 			ptr = ((char *)data + off);
 #ifdef DEBUG
@@ -383,14 +386,15 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 		}
 		else
 		{
-			if (delta > 1)
+			if (decoded.length() > 0)
 				decoded.push_back('.');
 
+			++ptr;
 			decoded.append(ptr, len);
 			ptr += len;
 
 			if (jumped == false)
-				delta += len;
+				delta += len + 1;
 		}
 	}
 
@@ -631,11 +635,11 @@ void serviceDiscoverer::mdns_print_record(std::string host, struct mdns_record& 
 	std::cout << " Host          " << host << std::endl;
 	uint32_t age = (time(NULL) - record.cached);
 	fprintf(stdout,
-			" Type          %s\n"
-			" Class         %s\n"
+			" Type          %s (%hu)\n"
+			" Class         %s (%hu)\n"
 			" Time-to-Live  %u second%s\n"
 			" Age           %u second%s\n",
-			this->type_str(record.type), this->klass_str(record.klass),
+			this->type_str(record.type), record.type, this->klass_str(record.klass), record.klass,
 			record.ttl,
 			record.ttl == 1 ? "" : "s",
 			age,
@@ -644,7 +648,7 @@ void serviceDiscoverer::mdns_print_record(std::string host, struct mdns_record& 
 	if (record.type == this->mdns_types["A"])
 	{
 		fprintf(stdout,
-			" Address       %s\n\n",
+			" IPv4 Address  %s\n\n",
 			inet_ntoa(record.inet4));
 	}
 	else
@@ -662,15 +666,24 @@ void serviceDiscoverer::mdns_print_record(std::string host, struct mdns_record& 
 	else
 	if (record.type == this->mdns_types["TXT"] && record.text_data != NULL)
 	{
-		fprintf(stdout, " Text-Record Key/Value pairs\n\n");
+		fprintf(stdout, "\n");
 		for (std::map<std::string,std::string>::iterator map_iter = record.text_data->begin();
 				map_iter != record.text_data->end();
 				++map_iter)
 		{
-			fprintf(stdout, " %s=%s\n", map_iter->first.data(), map_iter->second.data());
+			fprintf(stdout, "    %s=%s\n", map_iter->first.data(), map_iter->second.data());
 		}
 
 		fprintf(stdout, "\n");
+	}
+	else
+	if (record.type == this->mdns_types["AAAA"])
+	{
+		static char ipv6_str[INET6_ADDRSTRLEN];
+		inet_ntop(AF_INET6, (void *)&record.inet6, ipv6_str, INET6_ADDRSTRLEN);
+		fprintf(stdout,
+			" IPv6 Address  %s\n\n",
+			ipv6_str);
 	}
 	else
 	if (record.type == this->mdns_types["PTR"])
@@ -927,16 +940,36 @@ int serviceDiscoverer::mdns_parse_queries(void *packet, size_t size, void *data_
 
 	while (true)
 	{
+#ifdef DEBUG
+		for (int i = 0; i < 8; ++i)
+			fprintf(stderr, "\\x%02hhx", ptr[i]);
+		fprintf(stderr, "\n");
+#endif
 		decoded = this->decode_name(packet, ptr, &delta);
 
 		ptr += delta;
 
+#ifdef DEBUG
+		for (int i = 0; i < 8; ++i)
+			fprintf(stderr, "\\x%02hhx", ptr[i]);
+		fprintf(stderr, "\n");
+#endif
 		type = this->get_16bit_val(ptr);
 		ptr += 2;
+#ifdef DEBUG
+		for (int i = 0; i < 8; ++i)
+			fprintf(stderr, "\\x%02hhx", ptr[i]);
+		fprintf(stderr, "\n");
+#endif
 		klass = this->get_16bit_val(ptr);
 		ptr += 2;
 
-		std::cerr << "\nQuery  \"" << decoded << "\" [" << this->type_str(type) << " : " << this->klass_str(klass) << "]\n" << std::endl;
+#ifdef DEBUG
+		std::cerr << "type: " << type << " : " << htons(type) << std::endl;
+		std::cerr << "class: " << klass << " : " << htons(klass) << std::endl;
+#endif
+
+		std::cerr << "\nQuery  \"" << decoded << "\" [" << this->type_str(type) << "(" << type << ") : " << this->klass_str(klass) << "(" << klass <<  ")]\n" << std::endl;
 
 		--nr;
 		if (!nr)
@@ -990,6 +1023,12 @@ int serviceDiscoverer::mdns_parse_answers(void *packet, size_t size, void *data_
 		{
 			record.text_data = this->mdns_parse_text_record((void *)ptr, record.data_len);
 			ptr += record.data_len;
+		}
+		else
+		if (record.type == this->mdns_types["AAAA"])
+		{
+			memcpy((void *)&record.inet6, (void *)ptr, 16);
+			ptr += 16;
 		}
 		else
 		if (record.type == this->mdns_types["SRV"])
