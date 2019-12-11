@@ -603,15 +603,25 @@ void serviceDiscoverer::mdns_save_cached_records(void)
 			else
 			if (list_iter->type == this->mdns_types["TXT"])
 			{
-				fprintf(fp, " Text-Record Key/Value pairs\n\n");
+				fprintf(fp, "\n");
 				for (std::map<std::string,std::string>::iterator _list_iter = list_iter->text_data->begin();
 						_list_iter != list_iter->text_data->end();
 						++_list_iter)
 				{
-					fprintf(fp, " %s=%s\n", _list_iter->first.data(), _list_iter->second.data());
+					fprintf(fp, "    %s=%s\n", _list_iter->first.data(), _list_iter->second.data());
 				}
 
 				fprintf(fp, "\n");
+			}
+			else
+			if (list_iter->type == this->mdns_types["AAAA"])
+			{
+				static char ipv6_str[INET6_ADDRSTRLEN];
+
+				inet_ntop(AF_INET6, (void *)&record.inet6, ipv6_str, INET6_ADDRSTRLEN);
+				fprintf(fp,
+					" IPv6 Address  %s\n\n",
+					ipv6_str);
 			}
 			else
 			if (list_iter->type == this->mdns_types["PTR"])
@@ -704,9 +714,6 @@ std::map<std::string,std::string> *serviceDiscoverer::mdns_parse_text_record(voi
 	char *eq;
 	int kvlen;
 
-#ifdef DEBUG
-	std::cerr << "Parsing text record: len == " << len << " and first byte == " << *p << std::endl;
-#endif
 	if (len == 1 && *p == 0)
 		return NULL;
 /*
@@ -720,13 +727,6 @@ std::map<std::string,std::string> *serviceDiscoverer::mdns_parse_text_record(voi
 	std::string key;
 	std::string value;
 
-#ifdef DEBUG
-	std::cerr << "Currently at data:\n" << std::endl;
-	for (int i = 0; i < 20; ++i)
-		fprintf(stderr, "\\x%02hhx", p[i]);
-	fprintf(stderr, "\n");
-#endif
-
 	while (p < end)
 	{
 /*
@@ -736,13 +736,11 @@ std::map<std::string,std::string> *serviceDiscoverer::mdns_parse_text_record(voi
 		++p;
 		assert(kvlen > 0);
 		e = (p + kvlen);
-#ifdef DEBUG
-		fprintf(stderr, "Working on key/value pair: \"%.*s\"\n", kvlen, p);
-#endif
 
 		if (e > end)
 		{
-			std::cerr << __func__ << ": key start + length of key/value pair is beyond end of data!" << std::endl;
+			errno = EPROTO;
+			error("key start + length of key/value pair is beyond end of data");
 			fprintf(stderr, "(%.*s)\n", (int)kvlen, p);
 			delete __ret;
 			return NULL;
@@ -778,8 +776,6 @@ std::map<std::string,std::string> *serviceDiscoverer::mdns_parse_text_record(voi
 			value.append(p, (e - p));
 		}
 
-		fprintf(stderr, "Got key \"%s\" and value \"%s\"\n", key.data(), value.data());
-
 		p = e;
 /*
  * Ignore repeated occurences of keys.
@@ -800,131 +796,6 @@ std::map<std::string,std::string> *serviceDiscoverer::mdns_parse_text_record(voi
 
 	return __ret;
 }
-
-#if 0
-int serviceDiscoverer::mdns_handle_response_packet(void *packet, size_t size)
-{
-	struct mdns_hdr *hdr = (struct mdns_hdr *)packet;
-	struct mdns_record record;
-	char *ptr = (char *)packet + sizeof(struct mdns_hdr);
-	uint16_t data_len;
-	std::string decoded_name;
-	int delta;
-
-	while (true)
-	{
-		decoded_name = this->decode_name(packet, ptr, &delta);
-
-		if (delta < 0)
-		{
-			std::cerr << __func__ << ": failed to decode name" << std::endl;
-			//free(decoded_name);
-			return -1;
-		}
-
-		ptr += delta;
-		record.type = this->get_16bit_val(ptr);
-		ptr += 2;
-		record.klass = this->get_16bit_val(ptr);
-		ptr += 2;
-		record.ttl = this->get_32bit_val(ptr);
-		ptr += 4;
-		record.data_len = this->get_16bit_val(ptr);
-		ptr += 2;
-		record.cached = time(NULL);
-		record.text_data = NULL;
-
-		if (record.type == this->mdns_types["TXT"])
-		{
-			record.text_data = this->mdns_parse_text_record((void *)ptr, (size_t)record.data_len);
-			ptr += record.data_len;
-		}
-		else
-		if (record.type == this->mdns_types["SRV"])
-		{
-			record.srv_data.priority = this->get_16bit_val(ptr);
-			ptr += 2;
-			record.srv_data.weight = this->get_16bit_val(ptr);
-			ptr += 2;
-			record.srv_data.port = this->get_16bit_val(ptr);
-			ptr += 2;
-
-			record.srv_data.target = this->decode_name(packet, ptr, &delta);
-			ptr += delta;
-
-#if 0
-#ifdef DEBUG
-			std::cerr << "Got the following SRV data:\n" << std::endl;
-			std::cerr << "priority=" << record.srv_data.priority << std::endl;
-			std::cerr << "weight=" << record.srv_data.weight << std::endl;
-			std::cerr << "port=" << record.srv_data.port << std::endl;
-			std::cerr << "target=" << record.srv_data.target << std::endl;
-#endif
-#endif
-		}
-		else
-		{
-/*
- * For the timebeing, just ignore other types.
- */
-			ptr += record.data_len;
-		}
-
-		std::cout << "Service: " << decoded_name << std::endl;
-
-		std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->cached_records.find(decoded_name);
-
-		if (map_iter == this->cached_records.end())
-		{
-			map_iter->second.push_back(record);
-			std::cout << "Cached record for \"" << decoded_name << "\"" << std::endl;
-		}
-		else
-		{
-			//std::list<struct mdns_record> &__list = map_iter->second;
-			//std::list<struct mdns_record>::iterator list_iter;
-			bool no_cache = false;
-
-			for (std::list<struct mdns_record>::iterator list_iter = map_iter->second.begin();
-					list_iter != map_iter->second.end();
-					++list_iter)
-			//list_iter = __list.begin();
-			//while (list_iter != __list.end())
-			{
-				if (list_iter->type == record.type && list_iter->klass == record.klass)
-				{
-					if (this->cached_record_is_stale(*list_iter) == true || this->should_flush_cache(record.klass) == true)
-					{
-						if (list_iter->text_data != NULL)
-							delete list_iter->text_data;
-
-						map_iter->second.erase(list_iter);
-						map_iter->second.push_back(record);
-
-						std::cout << "Record for \"" << decoded_name << "\" is stale: removing from cache" << std::endl;
-						std::cout << "Cached fresh record for \"" << decoded_name << "\" exists" << std::endl;
-					}
-
-					no_cache = true;
-				}
-			}
-
-			if (!no_cache)
-			{
-				map_iter->second.push_back(record);
-				std::cout << "Cached record for \"" << decoded_name << "\" exists" << std::endl;
-			}
-			else
-			{
-				if (record.text_data != NULL)
-					delete record.text_data;
-
-				record.text_data = NULL;
-			}
-		}
-	}
-}
-#endif
 
 int serviceDiscoverer::mdns_parse_queries(void *packet, size_t size, void *data_start, uint16_t nr)
 {
@@ -949,27 +820,12 @@ int serviceDiscoverer::mdns_parse_queries(void *packet, size_t size, void *data_
 
 		ptr += delta;
 
-#ifdef DEBUG
-		for (int i = 0; i < 8; ++i)
-			fprintf(stderr, "\\x%02hhx", ptr[i]);
-		fprintf(stderr, "\n");
-#endif
 		type = this->get_16bit_val(ptr);
 		ptr += 2;
-#ifdef DEBUG
-		for (int i = 0; i < 8; ++i)
-			fprintf(stderr, "\\x%02hhx", ptr[i]);
-		fprintf(stderr, "\n");
-#endif
 		klass = this->get_16bit_val(ptr);
 		ptr += 2;
 
-#ifdef DEBUG
-		std::cerr << "type: " << type << " : " << htons(type) << std::endl;
-		std::cerr << "class: " << klass << " : " << htons(klass) << std::endl;
-#endif
-
-		std::cerr << "\nQuery  \"" << decoded << "\" [" << this->type_str(type) << "(" << type << ") : " << this->klass_str(klass) << "(" << klass <<  ")]\n" << std::endl;
+		std::cerr << "\nQuery  \"" << decoded << "\" [" << this->type_str(type) << " : " << this->klass_str(klass) << "]\n" << std::endl;
 
 		--nr;
 		if (!nr)
@@ -1055,37 +911,6 @@ int serviceDiscoverer::mdns_parse_answers(void *packet, size_t size, void *data_
 		}
 
 		this->mdns_print_record(decoded, record);
-#if 0
-		std::cerr << "Record for " << decoded << std::endl;
-
-		fprintf(stderr,
-				"Type = %s : Class = %s\n"
-				"TTL = %u seconds\n",
-				this->type_str(record.type), this->klass_str(record.klass),
-				record.ttl);
-
-		if (record.type == this->mdns_types["SRV"])
-		{
-			fprintf(stderr,
-				"Priority = %hu\n"
-				"Weight = %hu\n"
-				"Port = %hu\n",
-				record.srv_data.priority,
-				record.srv_data.weight,
-				record.srv_data.port);
-			std::cerr << "Target = " << record.srv_data.target << std::endl;
-		}
-		else
-		if (record.type == this->mdns_types["TXT"])
-		{
-			for (std::map<std::string,std::string>::iterator map_iter = record.text_data->begin();
-					map_iter != record.text_data->end();
-					++map_iter)
-			{
-				std::cerr << map_iter->first << "=" << map_iter->second << std::endl;
-			}
-		}
-#endif
 
 		std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->cached_records.find(decoded);
 		if (map_iter == this->cached_records.end())
