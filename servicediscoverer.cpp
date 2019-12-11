@@ -618,7 +618,7 @@ void serviceDiscoverer::mdns_save_cached_records(void)
 			{
 				static char ipv6_str[INET6_ADDRSTRLEN];
 
-				inet_ntop(AF_INET6, (void *)&record.inet6, ipv6_str, INET6_ADDRSTRLEN);
+				inet_ntop(AF_INET6, (void *)&list_iter->inet6, ipv6_str, INET6_ADDRSTRLEN);
 				fprintf(fp,
 					" IPv6 Address  %s\n\n",
 					ipv6_str);
