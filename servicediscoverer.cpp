@@ -19,6 +19,7 @@
 #include <iostream>
 #include <list>
 #include <map>
+#include <vector>
 
 #define mDNS_MULTICAST "224.0.0.251"
 #define mDNS_PORT 5353
@@ -70,6 +71,13 @@ struct label
 	off_t offset;
 };
 
+struct service
+{
+	std::string name;
+	uint16_t type;
+	uint16_t klass;
+};
+
 class serviceDiscoverer
 {
 	public:
@@ -106,7 +114,7 @@ class serviceDiscoverer
 
 	off_t label_get_offset(char *);
 	std::string decode_name(void *, char *, int *);
-	std::string encode_name(std::string);
+	std::string encode_names(std::vector<std::string>);
 
 	bool cached_record_is_stale(struct mdns_record&);
 	void check_cached_records(void);
@@ -138,9 +146,25 @@ class serviceDiscoverer
 		{ "IN", 1 }
 	};
 
+	std::vector<struct service> services =
+	{
+		{ "_http._tcp.local",  255, 1 },
+		{ "_p2pchat._tcp.local",  255, 1 },
+		{ "_ftp._tcp.local",  255, 1 },
+		{ "_webdav._tcp.local",  255, 1 },
+		{ "_imap._tcp.local",  255, 1 },
+		{ "_pop3._tcp.local",  255, 1 },
+		{ "_domain._udp.local",  255, 1 },
+		{ "_ntp._udp.local",  255, 1 },
+		{ "_printer._tcp.local",  255, 1 },
+		{ "_ipp._tcp.local",  255, 1 },
+		{ "_ipps._tcp.local",  255, 1 },
+		{ "_daap._tcp.local",  255, 1 },
+		{ "_pulse-server._tcp.local",  255, 1 }
+	}
+#if 0
 	std::list<std::string> services =
 	{
-		"_ipp._tcp.local",
 		"_http._tcp.local",
 		"_p2pchat._tcp.local",
 		"_ftp._tcp.local",
@@ -155,6 +179,7 @@ class serviceDiscoverer
 		"_daap._tcp.local",
 		"_pulse-server._tcp.local"
 	};
+#endif
 
 	int sock;
 	in_port_t port;
@@ -200,17 +225,16 @@ uint16_t serviceDiscoverer::new_txid(void)
 	return (uint16_t)((rand() >> 16) & 0xffff);
 }
 
-#define DNS_LABEL_OFFSET_BIAS (0x100 * 0xc0)
 off_t serviceDiscoverer::label_get_offset(char *p)
 {
 /*
  * ALWAYS remember it MUST be unsigned char, or you'll
  * get a NEGATIVE result for *p * 0x100 !
  */
-	return ((((unsigned char)*p * 0x100) + *(p+1)) - DNS_LABEL_OFFSET_BIAS);
+	return ((((unsigned char)*p * 0x100) & ~(0xc0)) + *(p+1));
 }
 
-std::string serviceDiscoverer::encode_names(std::vector<std::string> names)
+std::string serviceDiscoverer::encode_names(std::vector<struct service> services)
 {
 	char *encoded = (char *)calloc(1024, 1);
 	char *tmp = (char *)calloc(1024, 1);
@@ -222,6 +246,7 @@ std::string serviceDiscoverer::encode_names(std::vector<std::string> names)
 	std::map<std::string,uint16_t> label_cache;
 	std::map<std::string,uint16_t>::iterator map_iter;
 	std::string token;
+	bool need_null = true;
 
 	if (!tmp || !encoded)
 	{
@@ -238,9 +263,9 @@ std::string serviceDiscoverer::encode_names(std::vector<std::string> names)
 
 	i = 0;
 
-	for (int j = 0; j < names.length(); ++j)
+	for (int j = 0; j < services.size(); ++j)
 	{
-		std::string name = names[j];
+		std::string name = services[j].name;
 
 		strcpy(tmp, name.data());
 		strcat(tmp, ".");
@@ -254,52 +279,62 @@ std::string serviceDiscoverer::encode_names(std::vector<std::string> names)
 		while (true)
 		{
 			dot = (char *)memchr(p, '.', (e - p));
-
 /*
  * We should always find a dot at the end
  * of each label after the strcat() above.
  */
-		if (!dot)
-		{
-			std::cerr << __func__ << ": failed to find '.' char in name string" << std::endl;
-			return NULL;
+			if (!dot)
+			{
+				std::cerr << __func__ << ": failed to find '.' char in name string" << std::endl;
+				return NULL;
+			}
+
+			token.clear();
+			token.append(p, (dot - p));
+			if ((map_iter = label_cache.find(token)) != label_cache.end())
+			{
+				uint16_t off = map_iter->second;
+				off |= (0xc0 << 8);
+				memcpy((void *)&encoded[i], (void *)&off, 2);
+				i += 2;
+
+				need_null = false;
+				break;
+			}
+			else
+			{
+				uint16_t off = (12 + i);
+				label_cache.insert(std::pair<std::string,uint16_t>(token, off));
+				encoded[i++] = (unsigned char)(dot - p);
+				memcpy((void *)&encoded[i], (void *)p, (dot - p));
+				i += (dot - p);
+			}
+
+			p = ++dot;
+
+			if (dot >= e)
+				break;
 		}
 
-		token.clear();
-		token.append(p, (dot - p));
-		if ((map_iter = label_cache.find(token)) != label_cache.end())
-		{
-			uint16_t off = map_iter->second;
-			off |= (0xc0 << 8);
-			memcpy((void *)&encoded[i], (void *)&off, 2);
-			i += 2;
-
-			continue;
-		}
+		if (need_null == true)
+			encoded[i++] = 0;
 		else
-		{
-			uint16_t off = (12 + i);
-			label_cache.insert(std::pair<std::string,uint16_t>(token, off));
-			encoded[i++] = (unsigned char)(dot - p);
-			memcpy((void *)&encoded[i], (void *)p, (dot - p));
-			i += (dot - p);
-		}
+			need_null = true;
 
-		p = ++dot;
-
-		if (dot >= e)
-			break;
-		}
+		memcpy((void *)&encoded[i], (void *)&services[j].type, 2);
+		i += 2;
+		memcpy((void *)&encoded[i], (void *)&services[j].klass, 2);
+		i += 2;
 	}
 
 	encoded[i] = 0;
 
-	std::string _encoded = encoded;
+	std::string data = encoded;
 
 	free(tmp);
 	free(encoded);
 
-	return _encoded;
+	return data;
 }
 
 #define LABEL_JUMP_INDICATOR 0xc0
@@ -310,6 +345,7 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 	char *ptr;
 	int didx = 0;
 	int delta = 0;
+	unsigned char len;
 	std::string decoded;
 
 #ifdef DEBUG
@@ -320,18 +356,15 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 	std::cerr << "(this is " << (name - (char *)data) << " bytes from start of data" << std::endl;
 #endif
 	ptr = name;
-	if ((unsigned char)*ptr < 0x20 && (unsigned char)*ptr < 0xc0)
-	{
-		++ptr;
-		++delta;
-	}
 
 	while (true)
 	{
-		if (*ptr == 0)
-			break;
+		len = (unsigned char)*ptr;
 
-		if ((unsigned char)*ptr >= LABEL_JUMP_INDICATOR)
+		if (!len)
+			break;
+		else
+		if (len >= LABEL_JUMP_INDICATOR)
 		{
 #ifdef DEBUG
 			std::cerr << "Jumping! Currently at:\n" << std::endl;
@@ -342,7 +375,7 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 #endif
 			off = this->label_get_offset(ptr);
 #ifdef DEBUG
-			std::cerr << "Jump to start of mDNS packet + " << off << " bytes" << std::endl;
+			std::cerr << "Jump to start of mDNS packet + " << (unsigned char)off << " bytes" << std::endl;
 #endif
 			ptr = ((char *)data + off);
 #ifdef DEBUG
@@ -352,17 +385,17 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 			fprintf(stderr, "\n");
 #endif
 			jumped = true;
+			continue;
 		}
-
-		if ((unsigned char)*ptr < 0x20)
-			decoded.push_back('.');
 		else
-			decoded.push_back(*ptr);
+		{
+			decoded.push_back('.');
+			decoded.append(ptr, len);
+			ptr += len;
 
-		++ptr;
-
-		if (jumped == false)
-			++delta;
+			if (jumped == false)
+				delta += len;
+		}
 	}
 
 	//dest[didx] = 0;
@@ -438,20 +471,12 @@ bool serviceDiscoverer::is_response(uint16_t flags)
 
 uint32_t serviceDiscoverer::get_32bit_val(char *p)
 {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
 	return ntohl(*((uint32_t *)p));
-#else
-	return *((uint32_t *)p);
-#endif
 }
 
 uint16_t serviceDiscoverer::get_16bit_val(char *p)
 {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
 	return ntohs(*((uint16_t *)p));
-#else
-	return *((uint16_t *)p);
-#endif
 }
 
 bool serviceDiscoverer::should_flush_cache(uint16_t k)
