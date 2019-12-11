@@ -71,7 +71,7 @@ struct label
 	off_t offset;
 };
 
-struct service
+struct Query
 {
 	std::string name;
 	uint16_t type;
@@ -146,7 +146,7 @@ class serviceDiscoverer
 		{ "IN", 1 }
 	};
 
-	std::vector<struct service> services =
+	std::vector<struct Query> services =
 	{
 		{ "_http._tcp.local",  255, 1 },
 		{ "_p2pchat._tcp.local",  255, 1 },
@@ -234,7 +234,7 @@ off_t serviceDiscoverer::label_get_offset(char *p)
 	return ((((unsigned char)*p * 0x100) & ~(0xc0)) + *(p+1));
 }
 
-std::string serviceDiscoverer::encode_names(std::vector<struct service> services)
+std::string serviceDiscoverer::encode_names(std::vector<struct Query> queries)
 {
 	char *encoded = (char *)calloc(1024, 1);
 	char *tmp = (char *)calloc(1024, 1);
@@ -263,9 +263,9 @@ std::string serviceDiscoverer::encode_names(std::vector<struct service> services
 
 	i = 0;
 
-	for (int j = 0; j < services.size(); ++j)
+	for (int j = 0; j < queries.size(); ++j)
 	{
-		std::string name = services[j].name;
+		std::string name = queries[j].name;
 
 		strcpy(tmp, name.data());
 		strcat(tmp, ".");
@@ -321,9 +321,9 @@ std::string serviceDiscoverer::encode_names(std::vector<struct service> services
 		else
 			need_null = true;
 
-		memcpy((void *)&encoded[i], (void *)&services[j].type, 2);
+		memcpy((void *)&encoded[i], (void *)&queries[j].type, 2);
 		i += 2;
-		memcpy((void *)&encoded[i], (void *)&services[j].klass, 2);
+		memcpy((void *)&encoded[i], (void *)&queries[j].klass, 2);
 		i += 2;
 	}
 
