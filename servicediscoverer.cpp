@@ -1256,8 +1256,8 @@ int serviceDiscoverer::mdns_query_all_services(void)
 
 	std::vector<struct Query> vquery;
 
-	vquery.append(query);
-	
+	vquery.push_back(query);
+
 	data = this->encode_data(vquery);
 	ptr = (char *)data.data();
 	memcpy((void *)b, ptr, data.length());
