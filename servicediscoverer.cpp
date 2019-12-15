@@ -142,6 +142,8 @@ class serviceDiscoverer
 		{ "IN", 1 }
 	};
 
+	std::string special_query_all = "_services._dns-sd._udp.local";
+
 	std::vector<struct Query> services =
 	{
 		{ "_http._tcp.local",  255, 1 },
@@ -187,7 +189,8 @@ class serviceDiscoverer
 	int query_interval = 120; /* seconds */
 	int disk_push_interval = 600; /* seconds */
 
-	std::map<std::string,std::list<struct mdns_record> > cached_records;
+	std::map<std::string,short> label_cache;
+	std::map<std::string,std::list<struct mdns_record> > record_cache;
 };
 
 serviceDiscoverer::serviceDiscoverer()
@@ -202,8 +205,8 @@ serviceDiscoverer::serviceDiscoverer()
 
 serviceDiscoverer::~serviceDiscoverer()
 {
-	for (std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->cached_records.begin();
-			map_iter != this->cached_records.end();
+	for (std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->record_cache.begin();
+			map_iter != this->record_cache.end();
 			++map_iter)
 	{
 		for (std::list<struct mdns_record>::iterator list_iter = map_iter->second.begin();
@@ -418,8 +421,8 @@ void serviceDiscoverer::check_cached_records(void)
 #ifdef DEBUG
 	std::cerr << "Checking cache for stale records" << std::endl;
 #endif
-	for (std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->cached_records.begin();
-				map_iter != this->cached_records.end();
+	for (std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->record_cache.begin();
+				map_iter != this->record_cache.end();
 				++map_iter)
 	{
 		for (std::list<struct mdns_record>::iterator list_iter = map_iter->second.begin();
@@ -559,8 +562,8 @@ void serviceDiscoverer::mdns_save_cached_records(void)
 		return;
 	}
 
-	for (std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->cached_records.begin();
-			map_iter != this->cached_records.end();
+	for (std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->record_cache.begin();
+			map_iter != this->record_cache.end();
 			++map_iter)
 	{
 		if (map_iter->second.empty() || map_iter->first.length() < 3)
@@ -912,15 +915,15 @@ int serviceDiscoverer::mdns_parse_answers(void *packet, size_t size, void *data_
 
 		this->mdns_print_record(decoded, record);
 
-		std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->cached_records.find(decoded);
-		if (map_iter == this->cached_records.end())
+		std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->record_cache.find(decoded);
+		if (map_iter == this->record_cache.end())
 		{
 #ifdef DEBUG
 			std::cerr << "No record in cache for " << decoded << ": caching record" << std::endl;
 #endif
 			std::list<struct mdns_record> __list;
 			__list.push_back(record);
-			this->cached_records.insert( std::pair<std::string,std::list<struct mdns_record> >(decoded, __list) );
+			this->record_cache.insert( std::pair<std::string,std::list<struct mdns_record> >(decoded, __list) );
 #ifdef DEBUG
 			std::cerr << "Record for " << decoded << " added to cache" << std::endl;
 #endif
@@ -1245,7 +1248,17 @@ int serviceDiscoverer::mdns_query_all_services(void)
 	mdns->txid = htons(this->new_txid());
 	b = (char *)buffer + sizeof(*ip) + sizeof(*udp) + sizeof(*mdns);
 
-	data = this->encode_data(this->services);
+	struct Query query;
+
+	query.name = this->special_query_all;
+	query.type = this->mdns_types["PTR"];
+	query.klass = this->mdns_classes["IN"];
+
+	std::vector<struct Query> vquery;
+
+	vquery.append(query);
+	
+	data = this->encode_data(vquery);
 	ptr = (char *)data.data();
 	memcpy((void *)b, ptr, data.length());
 	b += data.length();
