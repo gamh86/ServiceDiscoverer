@@ -22,126 +22,6 @@
 #include <vector>
 #include "servicediscoverer.hpp"
 
-class serviceDiscoverer
-{
-	public:
-
-	serviceDiscoverer();
-
-	~serviceDiscoverer();
-
-	int mdns_query_service(std::string);
-	int mdns_query_all_services(void);
-	int mdns_listen(void);
-
-	private:
-
-	int startup(void);
-	int mdns_handle_packet(void *, size_t);
-	//int mdns_handle_response_packet(void *, size_t);
-	int mdns_parse_queries(void *, size_t, void *, uint16_t);
-	int mdns_parse_answers(void *, size_t, void *, uint16_t);
-	int mdns_parse_authoritative(void *, size_t, void *, uint16_t);
-	int mdns_parse_additional(void *, size_t, void *, uint16_t);
-	void mdns_print_record(std::string, struct mdns_record&);
-	std::map<std::string,std::string> *mdns_parse_text_record(void *, size_t);
-	std::list<std::string> tokenize_name(std::string, char);
-
-	bool should_replace_file(void);
-	bool should_do_query(void);
-
-	std::string timestamp_to_str(time_t);
-	void mdns_save_cached_records(void);
-
-	void default_iphdr(struct iphdr *);
-	void default_udphdr(struct udphdr *);
-
-	off_t label_get_offset(char *);
-	std::string decode_name(void *, char *, int *);
-	std::string encode_data(std::vector<struct Query>);
-
-	bool cached_record_is_stale(struct mdns_record&);
-	void check_cached_records(void);
-	uint16_t get_16bit_val(char *); /* parses from pointer into native byte order */
-	uint32_t get_32bit_val(char *); /* ' ' ' ' */
-	const char * klass_str(uint16_t);
-	const char * type_str(uint16_t);
-
-	bool is_udp_pkt(char *);
-	bool is_mdns_pkt(char *);
-	bool is_query(uint16_t);
-	bool is_response(uint16_t);
-	bool should_flush_cache(uint16_t); /* checks for the CACHE FLUSH bit in class field */
-
-	uint16_t new_txid(void); /* generate random 16-bit number */
-
-	std::map<const char *,uint16_t> mdns_types =
-	{
-		{ "A", 1 }, /* ipv4 record */
-		{ "PTR", 12 }, /* pointer record */
-		{ "TXT", 16 }, /* text record */
-		{ "AAAA", 28 }, /* ipv6 record */
-		{ "SRV", 33 }, /* services record */
-		{ "NSEC", 47 },
-		{ "ANY", 255 }
-	};
-
-	std::map<const char *,uint16_t> mdns_classes =
-	{
-		{ "IN", 1 }
-	};
-
-	std::string special_query_all = "_services._dns-sd._udp.local";
-
-	std::vector<struct Query> services =
-	{
-		{ "_http._tcp.local",  255, 1 },
-		{ "_p2pchat._tcp.local",  255, 1 },
-		{ "_ftp._tcp.local",  255, 1 },
-		{ "_webdav._tcp.local",  255, 1 },
-		{ "_imap._tcp.local",  255, 1 },
-		{ "_pop3._tcp.local",  255, 1 },
-		{ "_domain._udp.local",  255, 1 },
-		{ "_ntp._udp.local",  255, 1 },
-		{ "_printer._tcp.local",  255, 1 },
-		{ "_ipp._tcp.local",  255, 1 },
-		{ "_ipps._tcp.local",  255, 1 },
-		{ "_daap._tcp.local",  255, 1 },
-		{ "_pulse-server._tcp.local",  255, 1 }
-	};
-#if 0
-	std::list<std::string> services =
-	{
-		"_http._tcp.local",
-		"_p2pchat._tcp.local",
-		"_ftp._tcp.local",
-		"_webdav._tcp.local",
-		"_imap._tcp.local",
-		"_pop3._tcp.local",
-		"_domain._udp.local",
-		"_ntp._udp.local",
-		"_printer._tcp.local",
-		"_ipp._tcp.local",
-		"_ipps._tcp.local",
-		"_daap._tcp.local",
-		"_pulse-server._tcp.local"
-	};
-#endif
-
-	int sock;
-	in_port_t port;
-	struct sockaddr_in mdns_addr;
-	struct sockaddr_in local_ifaddr;
-
-	time_t time_last_service_query;
-	time_t time_next_disk_push;
-	int query_interval = 120; /* seconds */
-	int disk_push_interval = 600; /* seconds */
-
-	std::map<std::string,short> label_cache;
-	std::map<std::string,std::list<struct mdns_record> > record_cache;
-};
-
 serviceDiscoverer::serviceDiscoverer()
 {
 	srand(time(NULL));
@@ -972,7 +852,7 @@ int serviceDiscoverer::startup(void)
 	memcpy(&this->local_ifaddr, &ifr.ifr_addr, sizeof(struct sockaddr_in));
 
 	clear_struct(&mreq);
-	inet_aton(mDNS_MULTICAST, &mreq.imr_multiaddr);
+	inet_aton(mDNS_ADDR, &mreq.imr_multiaddr);
 	inet_aton("0.0.0.0", &mreq.imr_interface);
 
 /* Get a random high port */
@@ -1015,7 +895,7 @@ int serviceDiscoverer::startup(void)
 	}
 
 	clear_struct(&this->mdns_addr);
-	inet_aton(mDNS_MULTICAST, &this->mdns_addr.sin_addr);
+	inet_aton(mDNS_ADDR, &this->mdns_addr.sin_addr);
 	this->mdns_addr.sin_port = htons(5353);
 
 	this->time_next_disk_push = (time(NULL) + this->disk_push_interval);
