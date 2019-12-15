@@ -68,7 +68,7 @@ std::string serviceDiscoverer::encode_data(std::vector<struct Query> queries)
 	char *encoded = NULL;
 	char *tmp = NULL;
 	size_t len;
-	std::map<std::string,uint16_t> label_cache;
+	//std::map<std::string,uint16_t> label_cache;
 	std::map<std::string,uint16_t>::iterator map_iter;
 	std::list<std::string> tokens;
 	std::string data;
@@ -76,6 +76,7 @@ std::string serviceDiscoverer::encode_data(std::vector<struct Query> queries)
 	int pos = 0;
 	int nr_qs = 0;
 
+	this->label_cache.clear();
 	encoded = (char *)calloc(8192, 1);
 
 	if (!encoded)
@@ -109,7 +110,7 @@ std::string serviceDiscoverer::encode_data(std::vector<struct Query> queries)
 			std::cerr << "Token: " << *list_iter << std::endl;
 			std::cerr << "Length: " << list_iter->length() << std::endl;
 #endif
-			if ((map_iter = label_cache.find(*list_iter)) != label_cache.end())
+			if ((map_iter = this->label_cache.find(*list_iter)) != this->label_cache.end())
 			{
 #ifdef DEBUG
 				std::cerr << "Token \"" << *list_iter << "\" already in cache" << std::endl;
@@ -132,7 +133,7 @@ std::string serviceDiscoverer::encode_data(std::vector<struct Query> queries)
 #endif
 				uint16_t off;
 				off = (12 + pos);
-				label_cache.insert(std::pair<std::string,uint16_t>(*list_iter, off));
+				this->label_cache.insert(std::pair<std::string,uint16_t>(*list_iter, off));
 				encoded[pos++] = list_iter->length();
 				list_iter->copy((char *)&encoded[pos], list_iter->length(), 0);
 				pos += list_iter->length();
@@ -1102,57 +1103,6 @@ int serviceDiscoverer::mdns_query_all_services(void)
 	std::cerr << "Total length: " << ntohs(ip->tot_len) << std::endl;
 	std::cerr << "UDP length: " << ntohs(udp->len) << std::endl;
 	std::cerr << "MDNS Data length: " << data.length() << std::endl;
-#endif
-
-#if 0
-	for (std::list<std::string>::iterator list_iter = this->services.begin();
-			list_iter != this->services.end();
-			++list_iter)
-	{
-		tmp_string.clear();
-		tmp_string.append(list_iter->data(), list_iter->length());
-		tmp_string.push_back('.');
-
-		std::list<std::string> tokens = this->tokenize_name(tmp_string, '.');
-
-		if (tokens.empty())
-		{
-			std::cerr << __func__ << ": failed to tokenize \"" << *list_iter << "\"" << std::endl;
-			continue;
-		}
-
-		for (std::list<std::string>::iterator iter = tokens.begin();
-				iter != tokens.end();
-				++iter)
-		{
-			std::map<std::string,uint16_t>::iterator lc_iter = label_cache.find(*iter);
-			if (lc_iter != label_cache.end())
-			{
-				uint16_t _off = htons(lc_iter->second);
-				unsigned char *__uc = (unsigned char *)&_off;
-				*__uc |= (unsigned char)LABEL_JUMP_INDICATOR;
-				memcpy(b, &_off, 2);
-				b += 2;
-
-				break;
-			}
-			else
-			{
-				uint16_t _off = (uint16_t)calc_offset(mdns, b);
-				label_cache.insert(std::pair<std::string,uint16_t>(*iter, _off));
-				*b++ = (char)iter->length();
-				iter->copy(b, iter->length());
-				b += iter->length();
-			}
-		}
-
-		memcpy(b, &type, 2);
-		b += 2;
-		memcpy(b, &klass, 2);
-		b += 2;
-
-		++nr_qs;
-	}
 #endif
 
 	ssize_t bytes;
