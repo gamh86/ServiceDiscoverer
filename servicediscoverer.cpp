@@ -644,11 +644,6 @@ int serviceDiscoverer::mdns_parse_queries(void *packet, size_t size, void *data_
 
 	while (true)
 	{
-#ifdef DEBUG
-		for (int i = 0; i < 8; ++i)
-			fprintf(stderr, "\\x%02hhx", ptr[i]);
-		fprintf(stderr, "\n");
-#endif
 		decoded = this->decode_name(packet, ptr, &delta);
 
 		ptr += delta;
@@ -748,15 +743,9 @@ int serviceDiscoverer::mdns_parse_answers(void *packet, size_t size, void *data_
 		std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->record_cache.find(decoded);
 		if (map_iter == this->record_cache.end())
 		{
-#ifdef DEBUG
-			std::cerr << "No record in cache for " << decoded << ": caching record" << std::endl;
-#endif
 			std::list<struct mdns_record> __list;
 			__list.push_back(record);
 			this->record_cache.insert( std::pair<std::string,std::list<struct mdns_record> >(decoded, __list) );
-#ifdef DEBUG
-			std::cerr << "Record for " << decoded << " added to cache" << std::endl;
-#endif
 		}
 		else
 		{
@@ -766,11 +755,6 @@ int serviceDiscoverer::mdns_parse_answers(void *packet, size_t size, void *data_
 			{
 				if (list_iter->type == record.type && list_iter->klass == record.klass)
 				{
-#ifdef DEBUG
-					std::cerr << "Found previous record in cache for " << decoded << std::endl;
-					std::cerr << "Age = " << (time(NULL) - list_iter->cached) << " seconds" << std::endl;
-					std::cerr << "(ttl = " << list_iter->ttl << " seconds)" << std::endl;
-#endif
 					map_iter->second.erase(list_iter);
 					map_iter->second.push_back(record);
 					break;
@@ -857,7 +841,7 @@ int serviceDiscoverer::startup(void)
 	inet_aton("0.0.0.0", &mreq.imr_interface);
 
 /* Get a random high port */
-	this->port = ((rand() % (65535 - (IPPORT_RESERVED * 10))) + (IPPORT_RESERVED * 10));
+	this->port = ((rand() % (USHRT_MAX - (IPPORT_RESERVED * 10))) + (IPPORT_RESERVED * 10));
 
 	clear_struct(&sin);
 	sin.sin_addr.s_addr = INADDR_ANY;
