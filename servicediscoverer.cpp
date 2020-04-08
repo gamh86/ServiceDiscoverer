@@ -22,6 +22,14 @@
 #include <vector>
 #include "servicediscoverer.hpp"
 
+/*
+ * TODO
+ *
+ * Allow user to register a service and respond
+ * to any mDNS queries for the service.
+ *
+ */
+
 serviceDiscoverer::serviceDiscoverer()
 {
 	srand(time(NULL));
@@ -166,9 +174,13 @@ std::string serviceDiscoverer::encode_data(std::vector<struct Query> queries)
 	return data;
 }
 
-#define LABEL_JUMP_INDICATOR 0xc0
-std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
+#define LABEL_JUMP_INDICATOR (unsigned char)0xc0
+std::string serviceDiscoverer::decode_name(void *data, char *name, int *deltaPtr)
 {
+	assert(data);
+	assert(name);
+	assert(deltaPtr);
+
 	bool jumped = false;
 	off_t off;
 	char *ptr;
@@ -176,6 +188,7 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 	int delta = 0;
 	unsigned char len;
 	std::string decoded;
+	//std::vector<char *> jumpPoints;
 
 #ifdef DEBUG
 	std::cerr << "Entered decode_name(): sitting at:\n" << std::endl;
@@ -187,6 +200,7 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 	ptr = name;
 
 	decoded.clear();
+
 	while (true)
 	{
 		len = (unsigned char)*ptr;
@@ -207,6 +221,16 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 #ifdef DEBUG
 			std::cerr << "Jump to start of mDNS packet + " << off << " bytes" << std::endl;
 #endif
+		/*
+		 * No need to save pointer locations just before
+		 * each jump because we are just incrementing
+		 * DELTA based on whether we jumped or not.
+		 *
+		 * Only in cases where we need to be able to
+		 * return the pointer to the very first pre-jump
+		 * location do we need to save these pointers.
+		 */
+			//jumpPoints.push_back(ptr);
 			ptr = ((char *)data + off);
 #ifdef DEBUG
 			std::cerr << "Now at:\n" << std::endl;
@@ -219,15 +243,22 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 		}
 		else
 		{
+#ifdef DEBUG
+			std::cerr << "Length of next token: " << (size_t)len << std::endl;
+#endif
 			if (decoded.length() > 0)
 				decoded.push_back('.');
 
-			++ptr;
+			++ptr; // skip the byte for token length
 			decoded.append(ptr, len);
 			ptr += len;
 
-			if (jumped == false)
+			if (false == jumped)
 				delta += len + 1;
+
+#ifdef DEBUG
+			std::cerr << decoded << std::endl;
+#endif
 		}
 	}
 
@@ -236,13 +267,22 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *_delta)
 /*
  * Either NAME + DELTA == \x00 or NAME + DELTA == 0xCx (start of jump offset)
  */
-	if (jumped == true)
+	if (true == jumped)
 		delta += 2;
 	else
 		++delta;
 
-	*_delta = delta;
+	*deltaPtr = delta;
 
+#ifdef DEBUG
+	std::cerr << "Returning std::string (\"" << decoded << "\")" << std::endl;
+#endif
+/*
+ * XXX	For some reason, when the string object is
+ *	copied to the variable record.domain_name,
+ *	there is a SIGSEGV fault (%rdi is NULL - which is
+ *	the DOMAIN NAME string object.
+ */
 	return decoded;
 }
 
@@ -252,12 +292,12 @@ void serviceDiscoverer::check_cached_records(void)
 	std::cerr << "Checking cache for stale records" << std::endl;
 #endif
 	for (std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->record_cache.begin();
-				map_iter != this->record_cache.end();
-				++map_iter)
+		map_iter != this->record_cache.end();
+		++map_iter)
 	{
 		for (std::list<struct mdns_record>::iterator list_iter = map_iter->second.begin();
-					list_iter != map_iter->second.end();
-				)
+			list_iter != map_iter->second.end();
+			)
 		{
 			if (this->cached_record_is_stale(*list_iter))
 			{
@@ -356,7 +396,7 @@ const char *serviceDiscoverer::type_str(uint16_t type)
 
 std::string serviceDiscoverer::timestamp_to_str(time_t tstamp)
 {
-	static char tmp[128];
+	char tmp[128];
 	struct tm tm;
 
 	if (!gmtime_r((const time_t *)&tstamp, &tm))
@@ -402,8 +442,8 @@ void serviceDiscoverer::mdns_save_cached_records(void)
 		fprintf(fp, " Records for \"%s\"\n\n", map_iter->first.data());
 
 		for (std::list<struct mdns_record>::iterator list_iter = map_iter->second.begin();
-				list_iter != map_iter->second.end();
-				++list_iter)
+			list_iter != map_iter->second.end();
+			++list_iter)
 		{
 			fprintf(fp,
 					"\n"
@@ -556,7 +596,7 @@ std::map<std::string,std::string> *serviceDiscoverer::mdns_parse_text_record(voi
 	if (((char *)data)[0] == '=')
 		return NULL;
 
-	std::map<std::string,std::string> *__ret = new std::map<std::string,std::string>();
+	std::map<std::string,std::string> *text_KeyValueMap = new std::map<std::string,std::string>();
 	std::string key;
 	std::string value;
 
@@ -575,7 +615,7 @@ std::map<std::string,std::string> *serviceDiscoverer::mdns_parse_text_record(voi
 			errno = EPROTO;
 			error("key start + length of key/value pair is beyond end of data");
 			fprintf(stderr, "(%.*s)\n", (int)kvlen, p);
-			delete __ret;
+			delete text_KeyValueMap;
 			return NULL;
 		}
 
@@ -613,21 +653,21 @@ std::map<std::string,std::string> *serviceDiscoverer::mdns_parse_text_record(voi
 /*
  * Ignore repeated occurences of keys.
  */
-		if (__ret->find(key) == __ret->end())
-			__ret->insert(std::pair<std::string,std::string>(key, value));
+		if (text_KeyValueMap->find(key) == text_KeyValueMap->end())
+			text_KeyValueMap->insert(std::pair<std::string,std::string>(key, value));
 	}
 
 #ifdef DEBUG
 	std::cerr << "Got the following key/value pairs from the text record:\n" << std::endl;
-	for (std::map<std::string,std::string>::iterator map_iter = __ret->begin();
-				map_iter != __ret->end();
+	for (std::map<std::string,std::string>::iterator map_iter = text_KeyValueMap->begin();
+				map_iter != text_KeyValueMap->end();
 				++map_iter)
 	{
 		std::cerr << map_iter->first << "=" << map_iter->second << std::endl;
 	}
 #endif
 
-	return __ret;
+	return text_KeyValueMap;
 }
 
 int serviceDiscoverer::mdns_parse_queries(void *packet, size_t size, void *data_start, uint16_t nr)
@@ -673,8 +713,19 @@ int serviceDiscoverer::mdns_parse_answers(void *packet, size_t size, void *data_
 	char *ptr = (char *)data_start;
 	int delta;
 
-	clear_struct(&record);
-	record.text_data = NULL;
+/* XXX
+ *	NEVER do this!!
+ *	Thanks to doing this, we were getting SIGSEGV
+ *	when the string implementation was copying
+ *	the result from decode_name to any string
+ *	objects in the record structure (because
+ *	%rdi would obviously be 0x0000000000000000).
+ */
+	//clear_struct(&record);
+
+#ifdef DEBUG
+	std::cerr << "Entered mDNS_Parse_Answers(): " << nr << " to parse" << std::endl;
+#endif
 
 	while (true)
 	{
@@ -696,7 +747,7 @@ int serviceDiscoverer::mdns_parse_answers(void *packet, size_t size, void *data_
 			ptr += record.data_len;
 			break;
 		}
-
+		else
 		if (record.type == this->mdns_types["A"])
 		{
 			memcpy(&record.inet4, ptr, 4);
@@ -723,42 +774,72 @@ int serviceDiscoverer::mdns_parse_answers(void *packet, size_t size, void *data_
 			ptr += 2;
 			record.srv_data.port = this->get_16bit_val(ptr);
 			ptr += 2;
-
+#ifdef DEBUG
+			std::cerr << "Decoding TARGET for server record" << std::endl;
+#endif
 			record.srv_data.target = this->decode_name(packet, ptr, &delta);
 			ptr += delta;
 		}
 		else
 		if (record.type == this->mdns_types["PTR"])
 		{
+#ifdef DEBUG
+			std::cerr << "Decoding DOMAIN NAME for pointer record" << std::endl;
+#endif
 			record.domain_name = this->decode_name(packet, ptr, &delta);
 			ptr += delta;
+#ifdef DEBUG
+			std::cerr << "Domain Name: " << record.domain_name << std::endl;
+#endif
 		}
 		else
 		{
 			ptr += record.data_len;
 		}
 
+#ifdef DEBUG
+		std::cerr << "Printing decoded record for \"" << decoded << "\"" << std::endl;
+#endif
 		this->mdns_print_record(decoded, record);
 
+#ifdef DEBUG
+		std::cerr << "Adding record to record cache" << std::endl;
+#endif
 		std::map<std::string,std::list<struct mdns_record> >::iterator map_iter = this->record_cache.find(decoded);
 		if (map_iter == this->record_cache.end())
 		{
+#ifdef DEBUG
+			std::cerr << "Creating new cache record map entry" << std::endl;
+#endif
 			std::list<struct mdns_record> __list;
 			__list.push_back(record);
 			this->record_cache.insert( std::pair<std::string,std::list<struct mdns_record> >(decoded, __list) );
 		}
 		else
 		{
+#ifdef DEBUG
+			std::cerr << "Searching list for previous entry" << std::endl;
+#endif
+			bool replacedOld = false;
+
 			for (std::list<struct mdns_record>::iterator list_iter = map_iter->second.begin();
-					list_iter != map_iter->second.end();
-					++list_iter)
+				list_iter != map_iter->second.end();
+				++list_iter)
 			{
 				if (list_iter->type == record.type && list_iter->klass == record.klass)
 				{
 					map_iter->second.erase(list_iter);
 					map_iter->second.push_back(record);
+					replacedOld = true;
 					break;
 				}
+			}
+#ifdef DEBUG
+			std::cerr << "No previous record; adding record to list" << std::endl;
+#endif
+			if (false == replacedOld)
+			{
+				map_iter->second.push_back(record);
 			}
 		}
 
@@ -959,10 +1040,6 @@ int serviceDiscoverer::mdns_listen(void)
 				this->mdns_handle_packet((void *)mdns_start, (size_t)bytes);
 			}
 		}
-		else
-		{
-			/* do other stuff in the meantime */
-		}
 
 		this->check_cached_records();
 
@@ -1016,9 +1093,9 @@ std::list<std::string> serviceDiscoverer::tokenize_name(std::string name, char c
 		sep = (char *)memchr(p, c, (e - p));
 		if (!sep)
 		{
-			errno = EPROTO;
 			error("failed to find separator in name");
 			list.clear();
+			errno = EPROTO;
 			return list;
 		}
 
@@ -1035,12 +1112,13 @@ std::list<std::string> serviceDiscoverer::tokenize_name(std::string name, char c
 	return list;
 }
 
+#define BUFFER_SIZE 32768
 int serviceDiscoverer::mdns_query_all_services(void)
 {
 	struct iphdr *ip;
 	struct udphdr *udp;
 	struct mdns_hdr *mdns;
-	char *buffer = (char *)calloc(32768, 1);
+	char *buffer = (char *)calloc(BUFFER_SIZE, 1);
 	char *b = buffer;
 	char *ptr = NULL;
 	std::string data;
@@ -1052,15 +1130,17 @@ int serviceDiscoverer::mdns_query_all_services(void)
 		return -1;
 	}
 
-	memset(buffer, 0, 32768);
+	memset(buffer, 0, BUFFER_SIZE);
 	ip = (struct iphdr *)buffer;
 	udp = (struct udphdr *)((char *)buffer + sizeof(*ip));
-	mdns = (struct mdns_hdr *)((char *)buffer + sizeof(*ip) + sizeof(*udp));
+	mdns = (struct mdns_hdr *)((char *)udp + sizeof(*udp));
 
 	this->default_iphdr(ip);
 	this->default_udphdr(udp);
+
 	mdns->txid = htons(this->new_txid());
-	b = (char *)buffer + sizeof(*ip) + sizeof(*udp) + sizeof(*mdns);
+	b = (char *)mdns + sizeof(*mdns);
+	//b = (char *)buffer + sizeof(*ip) + sizeof(*udp) + sizeof(*mdns);
 
 	struct Query query;
 
@@ -1074,14 +1154,15 @@ int serviceDiscoverer::mdns_query_all_services(void)
 
 	data = this->encode_data(vquery);
 	ptr = (char *)data.data();
-	memcpy((void *)b, ptr, data.length());
+	memcpy((void *)b, (void *)ptr, data.length());
 	b += data.length();
 	*b = 0;
 
 	len = calc_offset(buffer, b);
 	ip->tot_len = (uint16_t)htons(len);
-	udp->len = (uint16_t)htons(len - 20);
-	mdns->nr_qs = htons(this->services.size());
+	udp->len = (uint16_t)htons(len - sizeof(*ip));
+	//mdns->nr_qs = htons(this->services.size());
+	mdns->nr_qs = (uint16_t)1; // Just one special query for local intranet services
 
 #ifdef DEBUG
 	std::cerr << "Total length: " << ntohs(ip->tot_len) << std::endl;
@@ -1099,6 +1180,7 @@ int serviceDiscoverer::mdns_query_all_services(void)
 	fprintf(stderr, "\n");
 #endif
 
+	std::cout << "Querying local services...");
 	bytes = sendto(this->sock, buffer, len, 0, (struct sockaddr *)&this->mdns_addr, (socklen_t)sizeof(this->mdns_addr));
 	free(buffer);
 	buffer = NULL;
@@ -1119,7 +1201,7 @@ int serviceDiscoverer::mdns_query_service(std::string hostname)
 	char *buffer = NULL;
 	char *b = NULL;
 
-	buffer = (char *)calloc(8192, 1);
+	buffer = (char *)calloc(BUFFER_SIZE, 1);
 	if (!buffer)
 	{
 		error("failed to allocate memory for packet buffer");
@@ -1136,7 +1218,7 @@ int serviceDiscoverer::mdns_query_service(std::string hostname)
 
 	ip = (struct iphdr *)buffer;
 	udp = (struct udphdr *)((char *)buffer + sizeof(*ip));
-	mdns = (struct mdns_hdr *)((char *)buffer + sizeof(*ip) + sizeof(*udp));
+	mdns = (struct mdns_hdr *)((char *)udp + sizeof(*udp));
 
 	this->default_iphdr(ip);
 	this->default_udphdr(udp);
@@ -1148,7 +1230,7 @@ int serviceDiscoverer::mdns_query_service(std::string hostname)
 	mdns->txid = this->new_txid();
 	mdns->nr_qs = htons(1);
 
-	b = (char *)buffer + sizeof(*ip) + sizeof(*udp) + sizeof(*mdns);
+	b = (char *)mdns + sizeof(*mdns);
 	memcpy((void *)b, (void *)encoded.data(), len);
 	b += len;
 	*b = 0;
@@ -1178,13 +1260,16 @@ int serviceDiscoverer::mdns_query_service(std::string hostname)
 
 static serviceDiscoverer *sd = NULL;
 
+/*
+ * XXX	Causing SIGSEGV when doing ctrl+c
+ */
 static void
 clean_up(int signo)
 {
-	if (signo != SIGINT && signo != SIGQUIT)
+	if (SIGINT != signo && SIGQUIT != signo)
 		return;
 
-	if (sd != NULL)
+	if (NULL != sd)
 		delete sd;
 
 	std::cerr << "Caught signal (" << signo << ")" << std::endl;
