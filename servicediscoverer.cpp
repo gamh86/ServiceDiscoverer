@@ -277,12 +277,6 @@ std::string serviceDiscoverer::decode_name(void *data, char *name, int *deltaPtr
 #ifdef DEBUG
 	std::cerr << "Returning std::string (\"" << decoded << "\")" << std::endl;
 #endif
-/*
- * XXX	For some reason, when the string object is
- *	copied to the variable record.domain_name,
- *	there is a SIGSEGV fault (%rdi is NULL - which is
- *	the DOMAIN NAME string object.
- */
 	return decoded;
 }
 
